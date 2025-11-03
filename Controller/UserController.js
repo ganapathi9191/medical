@@ -2360,7 +2360,7 @@ export const deleteAccount = async (req, res) => {
       from: 'pms226803@gmail.com',
       to: email,
       subject: 'Account Deletion Request Received',
-      text: `Hi ${user.name},\n\nWe have received your account deletion request. To confirm the deletion of your account, please click the link below:\n\n${deleteLink}\n\nReason: ${reason}\n\nIf you have any questions or need further assistance, please feel free to contact us at help.clynix@gmail.com.\n\nBest regards,\nYour Team`,
+      text: `Hi ${user.name},\n\nWe have received your account deletion request. To confirm the deletion of your account, please click the link below:\n\n${deleteLink}\n\nReason: ${reason}\n\nIf you have any questions or need further assistance, please feel free to contact us at Simcurarx@gmail.com.\n\nBest regards,\nYour Team`,
     };
 
     await transporter.sendMail(mailOptions);
