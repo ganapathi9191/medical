@@ -32,7 +32,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // CORS
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://31.97.206.144:8021', "http://31.97.206.144:8033", 'https://medical-delete-url.vercel.app'],
+  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://31.97.206.144:8021', "http://31.97.206.144:8033"],
   credentials: true
 }));
 
