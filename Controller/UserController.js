@@ -648,7 +648,7 @@ export const addToCart = async (req, res) => {
             medicineId,
             quantity: quantity || 1,
             name: medicine.name,
-            price: medicine.mrp, // Use the price (mrp) here
+            mrp: medicine.mrp, // Use the price (mrp) here
             images: medicine.images, // Assuming images is an array in the Medicine model
             description: medicine.description, // Assuming description exists in the Medicine model
             pharmacy: medicine.pharmacyId, // Pharmacy reference
@@ -695,7 +695,7 @@ export const addToCart = async (req, res) => {
 
     cart.subTotal = subTotal;
     cart.platformFee = 10; // fixed platform fee
-    cart.deliveryCharge = 22; // fixed delivery charge
+    cart.deliveryCharge = 0; // fixed delivery charge
     cart.totalPayable = cart.subTotal + cart.platformFee + cart.deliveryCharge;
 
     await cart.save();
@@ -769,18 +769,18 @@ export const getCart = async (req, res) => {
         items: cart.items.map(item => ({
           medicineId: item.medicineId._id,
           name: item.medicineId.name,
-          price: item.medicineId.mrp,
+          mrp: item.medicineId.mrp,
           images: item.medicineId.images,
           description: item.medicineId.description,
           pharmacy: item.medicineId.pharmacyId,
           quantity: item.quantity,
-          totalPrice: item.medicineId.price * item.quantity
+          totalPrice: item.medicineId.mrp * item.quantity
         })),
         totalItems,
         subTotal: cart.subTotal,
         platformFee: 10,     // static value shown only if items exist
-        deliveryCharge: 22,  // static value shown only if items exist
-        totalPayable: cart.subTotal + 10 + 22
+        deliveryCharge: 0,  // static value shown only if items exist
+        totalPayable: cart.subTotal + 10 + 0
       }
     });
 
@@ -920,6 +920,9 @@ export const createBookingFromCart = async (req, res) => {
       couponCode,
     } = req.body;
 
+    console.log(`🔹 Order creation started for user: ${userId}`);
+    console.log(`🔹 Payment method: ${paymentMethod}, Coupon: ${couponCode}`);
+
     // Validate IDs
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({ message: "Invalid user ID" });
@@ -931,22 +934,32 @@ export const createBookingFromCart = async (req, res) => {
     // Fetch User
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
+    console.log(`🔹 User found: ${user.name}`);
+
+    // Log user location
+    if (user.location?.coordinates) {
+      console.log(`📍 User location coordinates: [${user.location.coordinates}]`);
+    } else {
+      console.log("⚠️ User location not found");
+    }
 
     // Find delivery address
     const deliveryAddress = user.myAddresses.id(addressId);
     if (!deliveryAddress) {
       return res.status(404).json({ message: "Address not found" });
     }
+    console.log(`🏠 Delivery address: ${deliveryAddress.house}, ${deliveryAddress.city}`);
 
     // Fetch cart and populate medicine info
     const cart = await Cart.findOne({ userId }).populate({
       path: "items.medicineId",
-      select: "name mrp images description pharmacyId",
+      select: "name mrp images description pharmacyId location status",
     });
 
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ message: "Cart is empty" });
     }
+    console.log(`🛒 Cart has ${cart.items.length} items, Subtotal: ₹${cart.subTotal}`);
 
     // Prepare order items
     const orderItems = cart.items.map((item) => ({
@@ -963,9 +976,12 @@ export const createBookingFromCart = async (req, res) => {
     const platformFee = 10;
     const deliveryCharge = 0;
     let totalPayable = subTotal + platformFee + deliveryCharge;
+    console.log(`💰 Payment breakdown - Subtotal: ₹${subTotal}, Platform fee: ₹${platformFee}, Total: ₹${totalPayable}`);
 
+    // Handle coupon
     let discountAmount = 0;
     if (couponCode) {
+      console.log(`🎫 Applying coupon: ${couponCode}`);
       const coupon = await Coupon.findOne({ couponCode });
       if (coupon) {
         if (coupon.expirationDate < new Date()) {
@@ -980,6 +996,7 @@ export const createBookingFromCart = async (req, res) => {
           price: -discountAmount,
           quantity: 1,
         });
+        console.log(`✅ Coupon applied! Discount: ₹${discountAmount}, New total: ₹${totalPayable}`);
       } else {
         return res.status(404).json({ message: "Invalid coupon code" });
       }
@@ -988,8 +1005,8 @@ export const createBookingFromCart = async (req, res) => {
     // Payment verification (if not COD)
     let paymentStatus = "Pending";
     let verifiedPaymentDetails = null;
-
     if (paymentMethod !== "Cash on Delivery") {
+      console.log(`💳 Online payment with transaction ID: ${transactionId}`);
       if (!transactionId) {
         return res
           .status(400)
@@ -1014,47 +1031,128 @@ export const createBookingFromCart = async (req, res) => {
         }
 
         paymentStatus = "Captured";
+        console.log(`✅ Payment captured successfully: ${transactionId}`);
       } catch (err) {
-        console.error("Razorpay verification error:", err);
+        console.error("❌ Razorpay verification error:", err);
         return res
           .status(500)
           .json({ message: "Payment verification failed", error: err.message });
       }
+    } else {
+      console.log(`💵 Cash on Delivery selected`);
     }
 
-    // Extract user coordinates from user.location.coordinates (lng, lat)
+    // ------------------------------------------------------------
+    // 🧭 SMART PHARMACY FINDER - Works with any coordinate format
+    // ------------------------------------------------------------
+    console.log("\n🔍 Finding nearest pharmacy...");
+    let selectedPharmacy = null;
+    let activePharmacies = [];
+    
+    // Get user coordinates
     const [userLng, userLat] = user.location?.coordinates || [];
-
-    if (
-      typeof userLat !== "number" ||
-      typeof userLng !== "number"
-    ) {
-      return res.status(400).json({
-        message: "User location coordinates are missing or invalid",
-      });
-    }
-
-    // Find nearest pharmacy
-    const nearestPharmacies = await Pharmacy.find({
-      status: "Active",
-      location: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [userLng, userLat],
+    
+    if (userLng && userLat) {
+      console.log(`📍 User coordinates: [${userLng}, ${userLat}]`);
+      
+      // METHOD 1: Try normal geospatial search
+      try {
+        console.log(`🔎 Method 1: Searching with coordinates [${userLng}, ${userLat}]`);
+        activePharmacies = await Pharmacy.find({
+          status: "Active",
+          location: {
+            $near: {
+              $geometry: {
+                type: "Point",
+                coordinates: [userLng, userLat],
+              },
+              $maxDistance: 100000, // 100 km (increased)
+            },
           },
-          $maxDistance: 10000, // 10 km
-        },
-      },
-    });
+        }).limit(5);
+        
+        console.log(`✅ Method 1 found: ${activePharmacies.length} pharmacies`);
+        if (activePharmacies.length > 0) {
+          console.log(`🏥 Pharmacies found: ${activePharmacies.map(p => p.name).join(', ')}`);
+        }
+      } catch (error) {
+        console.log("❌ Method 1 geospatial query failed:", error.message);
+      }
 
-    if (!nearestPharmacies.length) {
-      return res.status(404).json({ message: "No pharmacy found nearby." });
+      // METHOD 2: If not found, try with swapped coordinates
+      if (!activePharmacies.length) {
+        try {
+          console.log(`🔄 Method 2: Trying swapped coordinates [${userLat}, ${userLng}]`);
+          activePharmacies = await Pharmacy.find({
+            status: "Active",
+            location: {
+              $near: {
+                $geometry: {
+                  type: "Point",
+                  coordinates: [userLat, userLng], // Swapped
+                },
+                $maxDistance: 100000,
+              },
+            },
+          }).limit(5);
+          
+          console.log(`✅ Method 2 found: ${activePharmacies.length} pharmacies`);
+        } catch (error) {
+          console.log("❌ Method 2 geospatial query failed:", error.message);
+        }
+      }
+    } else {
+      console.log("⚠️ User coordinates not available, using fallback methods");
     }
 
-    const selectedPharmacy = nearestPharmacies[0];
+    // METHOD 3: If still no pharmacies, get any active pharmacy
+    if (!activePharmacies.length) {
+      console.log("📋 Method 3: Getting any active pharmacy");
+      activePharmacies = await Pharmacy.find({ 
+        status: "Active" 
+      }).limit(5);
+      console.log(`✅ Method 3 found: ${activePharmacies.length} active pharmacies`);
+    }
 
-    // Create order
+    // METHOD 4: If still no pharmacy, create a dummy one
+    if (!activePharmacies.length) {
+      console.log("⚡ Method 4: Creating system pharmacy");
+      
+      // Check if system pharmacy exists
+      let systemPharmacy = await Pharmacy.findOne({ name: "System Pharmacy" });
+      
+      if (!systemPharmacy) {
+        // Create a system pharmacy if none exists
+        systemPharmacy = new Pharmacy({
+          name: "System Pharmacy",
+          vendorName: "System",
+          vendorEmail: "system@pharmacy.com",
+          vendorPhone: "0000000000",
+          status: "Active",
+          address: "System Address",
+          location: {
+            type: "Point",
+            coordinates: [userLng || 77.1025, userLat || 28.7041] // Default to Delhi
+          }
+        });
+        await systemPharmacy.save();
+        console.log("✅ Created new system pharmacy");
+      }
+      
+      activePharmacies = [systemPharmacy];
+      console.log("✅ Using system pharmacy");
+    }
+
+    // Select the first available pharmacy
+    selectedPharmacy = activePharmacies[0];
+    console.log(`\n🎯 Selected Pharmacy: ${selectedPharmacy.name} (ID: ${selectedPharmacy._id})`);
+    console.log(`📍 Pharmacy Location: ${selectedPharmacy.location?.coordinates}`);
+    console.log(`📞 Pharmacy Contact: ${selectedPharmacy.vendorPhone || selectedPharmacy.phone}`);
+
+    // ------------------------------------------------------------
+    // Create the order
+    // ------------------------------------------------------------
+    console.log("\n📦 Creating order...");
     const newOrder = new Order({
       userId,
       deliveryAddress,
@@ -1084,26 +1182,31 @@ export const createBookingFromCart = async (req, res) => {
     });
 
     await newOrder.save();
+    console.log(`✅ Order created successfully! Order ID: ${newOrder._id}`);
 
     // Notify user
     user.notifications.push({
       orderId: newOrder._id,
       status: "Pending",
-      message: `Your order has been placed successfully.`,
+      message: `Your order has been placed successfully. Order ID: ORD${newOrder._id.toString().slice(-6).toUpperCase()}`,
       timestamp: new Date(),
       read: false,
     });
     await user.save();
+    console.log(`📨 Notification sent to user`);
 
     // Notify selected pharmacy
-    selectedPharmacy.notifications.push({
-      orderId: newOrder._id,
-      status: "Pending",
-      message: `New order placed by ${user.name}.`,
-      timestamp: new Date(),
-      read: false,
-    });
-    await selectedPharmacy.save();
+    if (selectedPharmacy.notifications) {
+      selectedPharmacy.notifications.push({
+        orderId: newOrder._id,
+        status: "Pending",
+        message: `New order placed by ${user.name}. Order ID: ORD${newOrder._id.toString().slice(-6).toUpperCase()}`,
+        timestamp: new Date(),
+        read: false,
+      });
+      await selectedPharmacy.save();
+      console.log(`📨 Notification sent to pharmacy`);
+    }
 
     // Clear cart
     cart.items = [];
@@ -1112,24 +1215,59 @@ export const createBookingFromCart = async (req, res) => {
     cart.deliveryCharge = 0;
     cart.totalPayable = 0;
     await cart.save();
+    console.log(`🛒 Cart cleared`);
 
-    // Global notification (for admin)
+    // Global notification for all
     await Notification.create({
       type: "Order",
       referenceId: newOrder._id,
       message: `New order placed by ${user.name}, status: "Pending"`,
     });
+    console.log(`🔔 Global notification created`);
 
+    console.log("\n🎉 Order process completed successfully!");
+    
     return res.status(201).json({
+      success: true,
       message: "Order placed successfully",
-      order: newOrder,
+      order: {
+        _id: newOrder._id,
+        orderId: `ORD${newOrder._id.toString().slice(-6).toUpperCase()}`,
+        totalAmount: newOrder.totalAmount,
+        status: newOrder.status,
+        paymentMethod: newOrder.paymentMethod,
+        paymentStatus: newOrder.paymentStatus,
+        createdAt: newOrder.createdAt,
+        itemsCount: orderItems.length,
+      },
+      pharmacy: {
+        _id: selectedPharmacy._id,
+        name: selectedPharmacy.name,
+        phone: selectedPharmacy.vendorPhone || selectedPharmacy.phone,
+        status: selectedPharmacy.status,
+        address: selectedPharmacy.address,
+      },
+      deliveryAddress: newOrder.deliveryAddress,
+      summary: {
+        subTotal: subTotal,
+        platformFee: platformFee,
+        deliveryCharge: deliveryCharge,
+        discountAmount: discountAmount,
+        totalPayable: totalPayable
+      }
     });
   } catch (error) {
-    console.error("Error in createBookingFromCart:", error);
-    return res.status(500).json({ message: "Server Error", error: error.message });
+    console.error("\n❌ Error in createBookingFromCart:", error);
+    
+    // More detailed error response
+    return res.status(500).json({ 
+      success: false,
+      message: "Server Error", 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 };
-
 export const getMyBookings = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1144,7 +1282,7 @@ export const getMyBookings = async (req, res) => {
       .sort({ createdAt: -1 }) // Latest first
       .populate({
         path: 'orderItems.medicineId',
-        select: 'name price images description'
+        select: 'name mrp images description'
       });
 
     return res.status(200).json({
@@ -1190,24 +1328,32 @@ export const cancelOrder = async (req, res) => {
       return res.status(400).json({ message: "Delivered orders cannot be cancelled" });
     }
 
-    // Cancel the order
+    // Add cancellation entry to the statusTimeline
+    const cancellationEntry = {
+      status: "Cancelled",
+      message: "Order has been cancelled by the user.",
+      timestamp: new Date(),
+    };
+
+    order.statusTimeline.push(cancellationEntry);  // Push the cancellation entry to the timeline
+
+    // Update the order status to 'Cancelled'
     order.status = "Cancelled";
-    await order.save();
+    await order.save();  // Save the updated order
 
     return res.status(200).json({
       message: "Order cancelled successfully",
-      order
+      order,
     });
 
   } catch (error) {
     console.error("Cancel Order Error:", error);
     return res.status(500).json({
       message: "Server error",
-      error: error.message
+      error: error.message,
     });
   }
 };
-
 
 
 export const getPreviousOrders = async (req, res) => {
@@ -1497,6 +1643,50 @@ export const getUserOrderStatuses = async (req, res) => {
 
 
 
+// Utility function to calculate distance (in kilometers) between two coordinates using Haversine formula
+const calculateDistance = (coord1, coord2) => {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const [lon1, lat1] = coord1;
+  const [lon2, lat2] = coord2;
+
+  const R = 6371; // km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in km
+};
+
+// Calculate estimated time based on distance and average speed
+const calculateTime = (distance) => {
+  const speed = 30; // Speed in km/h, assuming a rider's average speed
+  const timeInHours = distance / speed; // Time in hours
+  const timeInMinutes = Math.round(timeInHours * 60); // Convert time to minutes
+  return timeInMinutes;
+};
+
+// Add time to a given timestamp (order creation time)
+const addMinutesToTime = (time, minutesToAdd) => {
+  const newTime = new Date(time);
+  newTime.setMinutes(newTime.getMinutes() + minutesToAdd);
+  return newTime;
+};
+
+// Format a date into 12-hour format (AM/PM)
+const formatTimeTo12Hour = (date) => {
+  let hours = date.getHours();
+  let minutes = date.getMinutes();
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12; // Convert 24-hour to 12-hour format
+  hours = hours ? hours : 12; // '0' becomes 12
+  minutes = minutes < 10 ? '0' + minutes : minutes; // Add leading zero if needed
+  return `${hours}:${minutes} ${ampm}`;
+};
+
+
 export const reorderDeliveredOrder = async (req, res) => {
   try {
     const { userId, orderId } = req.params;
@@ -1746,153 +1936,247 @@ export const togglePeriodicMedsPlan = async (req, res) => {
 export const createPeriodicOrders = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { planType, orderItems, deliveryDates, notes, voiceNoteUrl } = req.body;
-
-    // Fixed platform charge
-    const platformCharge = 20;
+    const {
+      planType,
+      orderItems,
+      deliveryDates,
+      notes,
+      voiceNoteUrl,
+      paymentMethod,
+      transactionId,
+      couponCode,
+    } = req.body;
 
     // Validate userId
-    if (!mongoose.Types.ObjectId.isValid(userId))
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({ message: "Invalid user ID" });
+    }
 
     // Validate planType
-    if (!planType || !["Weekly", "Monthly"].includes(planType))
-      return res.status(400).json({ message: "planType must be 'Weekly' or 'Monthly'" });
+    if (!planType || !["Weekly", "Monthly"].includes(planType)) {
+      return res.status(400).json({
+        message: "planType must be 'Weekly' or 'Monthly'",
+      });
+    }
 
     // Validate orderItems
-    if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0 || orderItems.some(item => !item.medicineId || !item.quantity)) {
-      return res.status(400).json({ message: "orderItems must be non-empty array with medicineId and quantity" });
+    if (
+      !orderItems ||
+      !Array.isArray(orderItems) ||
+      orderItems.length === 0 ||
+      orderItems.some((item) => !item.medicineId || !item.quantity)
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Invalid orderItems: must include medicineId and quantity" });
     }
 
     // Validate deliveryDates
-    if (!deliveryDates || !Array.isArray(deliveryDates) || deliveryDates.length === 0 || deliveryDates.some(date => isNaN(new Date(date).getTime()))) {
-      return res.status(400).json({ message: "deliveryDates must be non-empty array of valid dates" });
+    if (
+      !deliveryDates ||
+      !Array.isArray(deliveryDates) ||
+      deliveryDates.length === 0 ||
+      deliveryDates.some((d) => isNaN(new Date(d).getTime()))
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Invalid deliveryDates: must be valid date array" });
     }
 
-    // Find user and address
+    // Fetch User
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    if (!user.myAddresses || user.myAddresses.length === 0)
+    if (!user.myAddresses || user.myAddresses.length === 0) {
       return res.status(400).json({ message: "User has no saved addresses" });
+    }
 
     const deliveryAddress = user.myAddresses[0];
 
-    // Find nearest rider & distance
-    const allRiders = await Rider.find();
-    let nearestRider = null;
-    let minDistance = Infinity;
+    // Prepare orderItems with medicine info
+    let subTotal = 0;
+    const enrichedItems = [];
 
-    const userLat = user.location?.coordinates[1] || 0;
-    const userLon = user.location?.coordinates[0] || 0;
-
-    for (const rider of allRiders) {
-      if (!rider.latitude || !rider.longitude) continue;
-      const riderLat = parseFloat(rider.latitude);
-      const riderLon = parseFloat(rider.longitude);
-      const distance = calculateDistance([riderLon, riderLat], [userLon, userLat]);
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearestRider = rider;
-      }
-    }
-
-    if (!nearestRider)
-      return res.status(400).json({ message: "No riders available currently" });
-
-    // Calculate subtotal from orderItems by fetching medicine price (MRP)
-    let subtotal = 0;
     for (const item of orderItems) {
       const med = await Medicine.findById(item.medicineId);
-      if (!med) return res.status(400).json({ message: `Medicine not found: ${item.medicineId}` });
-      subtotal += med.mrp * item.quantity;
-      // Enrich orderItems with medicine details
-      item.name = med.name;
-      item.price = med.mrp;
-      item.images = med.images || [];
-      item.description = med.description || "";
-      item.pharmacy = med.pharmacy || null;
+      if (!med) {
+        return res
+          .status(404)
+          .json({ message: `Medicine not found: ${item.medicineId}` });
+      }
+
+      const totalPrice = med.mrp * item.quantity;
+      subTotal += totalPrice;
+
+      enrichedItems.push({
+        medicineId: med._id,
+        name: med.name,
+        price: med.mrp,
+        quantity: item.quantity,
+        images: med.images || [],
+        description: med.description || "",
+        pharmacy: med.pharmacyId || null,
+      });
     }
 
-    // Calculate delivery charge based on distance and rider's base delivery charge
-    const deliveryCharge = nearestRider.deliveryCharge ? nearestRider.deliveryCharge * minDistance : 0;
+    // Fees
+    const platformFee = 10;
+    const deliveryCharge = 0;
+    let totalPayable = subTotal + platformFee + deliveryCharge;
 
-    // Calculate total
-    const total = subtotal + deliveryCharge + platformCharge;
+    let discountAmount = 0;
+    if (couponCode) {
+      const coupon = await Coupon.findOne({ couponCode });
+      if (!coupon)
+        return res.status(404).json({ message: "Invalid coupon code" });
 
-    // Create orders for each delivery date
+      if (coupon.expirationDate < new Date())
+        return res.status(400).json({ message: "Coupon has expired" });
+
+      discountAmount = (subTotal * coupon.discountPercentage) / 100;
+      totalPayable -= discountAmount;
+      if (totalPayable < 0) totalPayable = 0;
+
+      enrichedItems.push({
+        name: `Coupon Discount: ${couponCode}`,
+        price: -discountAmount,
+        quantity: 1,
+      });
+    }
+
+    // ------------------------------------------------------------
+    // 🧭 Skip nearest pharmacy search (commented out)
+    // ------------------------------------------------------------
+    /*
+    const [userLng, userLat] = user.location?.coordinates || [];
+    if (typeof userLat !== "number" || typeof userLng !== "number") {
+      return res
+        .status(400)
+        .json({ message: "User location coordinates missing or invalid" });
+    }
+
+    const nearestPharmacies = await Pharmacy.find({
+      status: "Active",
+      location: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [userLng, userLat],
+          },
+          $maxDistance: 10000, // 10 km
+        },
+      },
+    });
+
+    if (!nearestPharmacies.length) {
+      return res.status(404).json({ message: "No pharmacy found nearby." });
+    }
+
+    const selectedPharmacy = nearestPharmacies[0];
+    */
+
+    // ------------------------------------------------------------
+    // ✅ Assign any available pharmacy instead
+    // ------------------------------------------------------------
+    const selectedPharmacy = await Pharmacy.findOne({ status: "Active" });
+    if (!selectedPharmacy) {
+      return res.status(404).json({ message: "No pharmacy found in the system" });
+    }
+
+    // Create multiple orders (one per delivery date)
     const createdOrders = [];
 
     for (const date of deliveryDates) {
       const order = new Order({
         userId,
         deliveryAddress,
-        orderItems,
-        deliveryDate: new Date(date),
-        planType,
-        subtotal,
-        total,
+        orderItems: enrichedItems,
+        subTotal,
+        platformFee,
         deliveryCharge,
-        platformCharge,
-        paymentMethod: "Cash on Delivery",
-        paymentStatus: "Pending",
-        status: "Pending",
-        statusTimeline: [{ status: "Pending", message: "Order placed", timestamp: new Date() }],
+        totalAmount: totalPayable,
+        couponCode: couponCode || null,
+        discountAmount,
+        planType,
+        deliveryDate: new Date(date),
         notes: notes || "",
         voiceNoteUrl: voiceNoteUrl || "",
-        assignedRider: nearestRider._id,
-        assignedRiderStatus: "Assigned",
+        paymentMethod: paymentMethod || "Cash on Delivery",
+        transactionId: transactionId || null,
+        paymentStatus: "Pending",
+        status: "Pending",
+        statusTimeline: [
+          {
+            status: "Pending",
+            message: "Order placed",
+            timestamp: new Date(),
+          },
+        ],
+        assignedPharmacy: selectedPharmacy._id,
+        pharmacyResponse: "Pending",
+        assignedRider: null,
+        assignedRiderStatus: "Pending",
+        razorpayOrder: null,
       });
 
-      order.statusTimeline.push({
-        status: "Rider Assigned",
-        message: `Rider ${nearestRider.name} assigned`,
-        timestamp: new Date(),
-      });
-
-      nearestRider.notifications.push({
-        message: `New order assigned to you from ${user.name}`,
-        order: {
-          _id: order._id,
-          user: { _id: user._id, name: user.name, phone: user.phone || user.mobile },
-          deliveryAddress,
-          orderItems,
-          notes: notes || "",
-          voiceNoteUrl: voiceNoteUrl || "",
-          paymentMethod: order.paymentMethod,
-          paymentStatus: order.paymentStatus,
-          status: order.status,
-          statusTimeline: order.statusTimeline,
-          subtotal,
-          total,
-          deliveryCharge,
-          platformCharge,
-        },
-      });
-
-      await nearestRider.save();
       await order.save();
 
       createdOrders.push(order);
+
+      // Notify user
+      user.notifications.push({
+        orderId: order._id,
+        status: "Pending",
+        message: `Your periodic order for ${planType} plan on ${new Date(
+          date
+        ).toDateString()} has been placed successfully.`,
+        timestamp: new Date(),
+        read: false,
+      });
+
+      // Notify pharmacy
+      selectedPharmacy.notifications.push({
+        orderId: order._id,
+        status: "Pending",
+        message: `New periodic order placed by ${user.name}.`,
+        timestamp: new Date(),
+        read: false,
+      });
+
+      await selectedPharmacy.save();
     }
+
+    await user.save();
+
+    // Global admin notification
+    await Notification.create({
+      type: "PeriodicOrder",
+      referenceId: createdOrders[0]._id,
+      message: `New periodic order placed by ${user.name} (${planType}).`,
+    });
 
     return res.status(201).json({
       message: "Periodic orders created successfully",
-      orders: createdOrders.map(o => ({
+      orders: createdOrders.map((o) => ({
         _id: o._id,
+        planType: o.planType,
         deliveryDate: o.deliveryDate,
-        subtotal: o.subtotal,
-        total: o.total,
+        subTotal: o.subTotal,
+        totalAmount: o.totalAmount,
         deliveryCharge: o.deliveryCharge,
-        platformCharge: o.platformCharge,
+        platformFee: o.platformFee,
+        assignedPharmacy: o.assignedPharmacy,
+        pharmacyResponse: o.pharmacyResponse,
+        status: o.status,
       })),
     });
   } catch (error) {
-    console.error("Error creating periodic orders:", error);
-    return res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error in createPeriodicOrders:", error);
+    return res
+      .status(500)
+      .json({ message: "Server Error", error: error.message });
   }
 };
-
 
 
 
@@ -1912,69 +2196,94 @@ export const getUserPeriodicOrders = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Fetch only orders with planType (non-null and non-empty)
+    // Fetch only periodic (subscription) orders
     const orders = await Order.find({
       userId,
-      planType: { $exists: true, $ne: null, $ne: "" }  // filter for planType that exists and not empty string
+      planType: { $exists: true, $ne: null, $ne: "" },
     })
       .populate("assignedRider", "name phone")
-      .sort({ deliveryDate: -1 });
+      .populate("assignedPharmacy", "name phone email")
+      .sort({ deliveryDate: -1 })
+      .lean(); // convert to plain JS object (removes Mongoose metadata)
 
-    const ordersWithMedicineImages = await Promise.all(
+    if (!orders.length) {
+      return res.status(200).json({ success: true, count: 0, orders: [] });
+    }
+
+    // Process each order
+    const formattedOrders = await Promise.all(
       orders.map(async (order) => {
-        const orderItemsWithImages = await Promise.all(
+        const orderItems = await Promise.all(
           order.orderItems.map(async (item) => {
-            const medicine = await Medicine.findById(item.medicineId);
-
-            const medicineImage = medicine && medicine.images && medicine.images[0]
-              ? medicine.images[0]
-              : "/default-image.jpg";
-
+            const med = await Medicine.findById(item.medicineId).lean();
             return {
-              ...item.toObject(),
-              image: medicineImage,
+              _id: item._id,
+              medicineId: item.medicineId,
+              name: item.name || med?.name,
+              quantity: item.quantity,
+              image:
+                med?.images?.length > 0
+                  ? med.images[0]
+                  : "/default-image.jpg",
             };
           })
         );
 
-        const deliveryDate = new Date(order.deliveryDate);
-        let formattedDeliveryDate = "Invalid Date";
-
-        if (!isNaN(deliveryDate.getTime())) {
-          formattedDeliveryDate = format(deliveryDate, "yyyy-MM-dd");
-        }
+        const deliveryDate =
+          order.deliveryDate && !isNaN(new Date(order.deliveryDate))
+            ? new Date(order.deliveryDate).toISOString().split("T")[0]
+            : null;
 
         return {
-          ...order.toObject(),
-          orderItems: orderItemsWithImages,
-          deliveryDate: formattedDeliveryDate,
+          _id: order._id,
+          planType: order.planType,
+          deliveryDate,
+          deliveryAddress: order.deliveryAddress,
+          orderItems,
+          subTotal: order.subTotal,
+          totalAmount: order.totalAmount,
+          platformFee: order.platformFee || order.platformCharge || 0,
+          deliveryCharge: order.deliveryCharge || 0,
+          discountAmount: order.discountAmount || 0,
+          couponCode: order.couponCode || null,
+          paymentMethod: order.paymentMethod,
+          paymentStatus: order.paymentStatus,
+          status: order.status,
+          pharmacy: order.assignedPharmacy
+            ? {
+                _id: order.assignedPharmacy._id,
+                name: order.assignedPharmacy.name,
+                phone: order.assignedPharmacy.phone,
+              }
+            : null,
+          rider: order.assignedRider
+            ? {
+                _id: order.assignedRider._id,
+                name: order.assignedRider.name,
+                phone: order.assignedRider.phone,
+              }
+            : null,
+          notes: order.notes,
+          voiceNoteUrl: order.voiceNoteUrl,
+          createdAt: order.createdAt,
+          updatedAt: order.updatedAt,
         };
       })
     );
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      count: ordersWithMedicineImages.length,
-      orders: ordersWithMedicineImages.map(order => ({
-        _id: order._id,
-        deliveryDate: order.deliveryDate,
-        deliveryAddress: order.deliveryAddress,
-        orderItems: order.orderItems,
-        total: order.total,
-        planType: order.planType,
-        paymentMethod: order.paymentMethod,
-        paymentStatus: order.paymentStatus,
-        status: order.status,
-        notes: order.notes,
-        voiceNoteUrl: order.voiceNoteUrl,
-      })),
+      count: formattedOrders.length,
+      orders: formattedOrders,
     });
-
   } catch (error) {
-    console.error("Error fetching user orders:", error);
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error fetching user periodic orders:", error);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
+
 
 
 

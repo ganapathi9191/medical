@@ -9,6 +9,9 @@ const messageSchema = new mongoose.Schema({
   message: {
     type: String,
   },
+    planType: {
+    type: String,
+  },
   sentAt: {
     type: Date,
     default: Date.now, // Automatically set the sent time to current date-time

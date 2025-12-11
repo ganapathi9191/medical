@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 const notificationSchema = new mongoose.Schema({
   type: { 
     type: String, 
-    enum: ['Order', 'Pharmacy'], 
+    enum: ['Order', 'Pharmacy', 'PeriodicOrder'], 
   },
   referenceId: { 
     type: mongoose.Schema.Types.ObjectId, 

@@ -60,8 +60,8 @@ const orderSchema = new mongoose.Schema(
     },
     assignedRiderStatus: {
       type: String,
-      enum: ['Assigned', 'Accepted', 'Rejected', 'In Progress', 'Completed', 'PickedUp', 'Failed'],
-      default: 'Assigned'
+      enum: ['Assigned', 'Accepted', 'Pending', 'Rejected', 'In Progress', 'Completed', 'PickedUp', 'Failed'],
+      default: 'Pending'
     },
     transactionId: {
       type: String,
@@ -87,7 +87,7 @@ const orderSchema = new mongoose.Schema(
     planType: { type: String, enum: ['Weekly', 'Monthly'], },
     subtotal: { type: Number, min: 0 }, // if you want to store separately
     deliveryCharge: { type: Number, min: 0, default: 0 },
-    platformCharge: { type: Number, min: 0, default: 20 },
+    platformFee: { type: Number, min: 0, default: 0 },
     total: { type: Number, min: 0 },  // or rename totalAmount to total
 
 

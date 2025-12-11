@@ -40,6 +40,18 @@ export const createPharmacy = async (req, res) => {
       });
     }
 
+    // ✅ Check if vendorPhone already exists (UNIQUE VALIDATION)
+    if (vendorPhone) {
+      const existingPhone = await Pharmacy.findOne({ vendorPhone });
+
+      if (existingPhone) {
+        return res.status(400).json({
+          message: "Vendor phone already exists",
+          existsInPharmacy: existingPhone.name,
+        });
+      }
+    }
+
     let imageUrl = '';
 
     // Upload pharmacy image
@@ -82,7 +94,7 @@ export const createPharmacy = async (req, res) => {
       }
     }
 
-    // Upload Aadhar document if exists
+    // Upload Aadhar document
     let aadharFileUrl = '';
     if (req.files?.aadharFile) {
       const uploaded = await cloudinary.uploader.upload(req.files.aadharFile.tempFilePath, {
@@ -91,7 +103,7 @@ export const createPharmacy = async (req, res) => {
       aadharFileUrl = uploaded.secure_url;
     }
 
-    // Upload PAN card document if exists
+    // Upload PAN card
     let panCardFileUrl = '';
     if (req.files?.panCardFile) {
       const uploaded = await cloudinary.uploader.upload(req.files.panCardFile.tempFilePath, {
@@ -100,7 +112,7 @@ export const createPharmacy = async (req, res) => {
       panCardFileUrl = uploaded.secure_url;
     }
 
-    // Upload License document if exists
+    // Upload License document
     let licenseFileUrl = '';
     if (req.files?.licenseFile) {
       const uploaded = await cloudinary.uploader.upload(req.files.licenseFile.tempFilePath, {
@@ -109,13 +121,13 @@ export const createPharmacy = async (req, res) => {
       licenseFileUrl = uploaded.secure_url;
     }
 
-    // Generate vendor ID and 4-digit password
+    // Generate vendor ID and password
     const lastPharmacy = await Pharmacy.findOne({})
       .sort({ createdAt: -1 })
       .select('vendorId')
       .lean();
 
-    let newNumber = 100001; // starting number
+    let newNumber = 100001;
 
     if (lastPharmacy?.vendorId && /^CX\d{6}$/.test(lastPharmacy.vendorId)) {
       const lastNumber = parseInt(lastPharmacy.vendorId.slice(2), 10);
@@ -124,10 +136,6 @@ export const createPharmacy = async (req, res) => {
 
     const vendorId = `CX${newNumber.toString().padStart(6, '0')}`;
     const password = Math.floor(1000 + Math.random() * 9000).toString();
-
-
-
-      // 🔔 Create Notification (Improved Message)
 
     // Create pharmacy
     const newPharmacy = new Pharmacy({
@@ -139,12 +147,10 @@ export const createPharmacy = async (req, res) => {
       categories: parsedCategories,
       vendorName,
       vendorEmail,
-      vendorPhone,
+      vendorPhone,         // keeps unique
       vendorId,
       password,
       status: "Pending",
-
-      // NEW fields added
       aadhar,
       aadharFile: aadharFileUrl,
       panCard,
@@ -153,37 +159,31 @@ export const createPharmacy = async (req, res) => {
       licenseFile: licenseFileUrl
     });
 
-     await Notification.create({
+    await newPharmacy.save();
+
+    // Create notifications
+    await Notification.create({
       type: "Pharmacy",
       referenceId: newPharmacy._id,
       message: `New pharmacy "${newPharmacy.name}" created. Please approve or reject.`,
       status: "Pending"
     });
 
-    await newPharmacy.save();
-
-    // Create notification
-    await Notification.create({
-      type: "Pharmacy",
-      referenceId: newPharmacy._id,
-      message: `New pharmacy "${newPharmacy.name}" created`,
-      status: "Pending"
-    });
-
     return res.status(201).json({
-      message: 'Pharmacy created successfully',
+      message: "Pharmacy created successfully",
       pharmacy: newPharmacy,
       vendorCredentials: { vendorId, password }
     });
 
   } catch (error) {
-    console.error('Error creating pharmacy:', error);
+    console.error("Error creating pharmacy:", error);
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
       error: error.message
     });
   }
 };
+
 
 
 export const updatePharmacy = async (req, res) => {
@@ -373,6 +373,11 @@ export const getAllPharmacies = async (req, res) => {
       const orderMonth = new Date(order.createdAt).toISOString().slice(0, 7); // "YYYY-MM"
 
       for (const item of order.orderItems) {
+        // Check if medicineId exists and is valid before using it
+        if (!item.medicineId || !medicineMap[item.medicineId.toString()]) {
+          continue; // Skip this item if medicineId is missing or invalid
+        }
+
         const med = medicineMap[item.medicineId.toString()];
         if (!med || !med.pharmacyId) continue;
 
@@ -761,12 +766,22 @@ export const getAllMedicines = async (req, res) => {
       query.name = { $regex: new RegExp(name, "i") }; // partial match
     }
 
-    // Fetch medicines and populate pharmacy with name, location, and address
-    const medicines = await Medicine.find(query)
-      .populate("pharmacyId", "name address");
+    // Fetch medicines and populate pharmacy with name and address
+    const medicines = await Medicine.find(query).populate("pharmacyId", "name address");
+
+    // Filter out medicines that don't have a pharmacy
+    const medicinesWithPharmacy = medicines.filter(med => med.pharmacyId);
+
+    if (medicinesWithPharmacy.length === 0) {
+      return res.status(200).json({
+        message: "No medicines available with a pharmacy",
+        total: 0,
+        medicines: []
+      });
+    }
 
     // Format response
-    const formatted = medicines.map(med => ({
+    const formatted = medicinesWithPharmacy.map(med => ({
       medicineId: med._id,
       name: med.name,
       images: med.images,
@@ -774,7 +789,7 @@ export const getAllMedicines = async (req, res) => {
       mrp: med.mrp,
       description: med.description,
       categoryName: med.categoryName,
-      pharmacy: med.pharmacyId,  // now includes address too
+      pharmacy: med.pharmacyId
     }));
 
     res.status(200).json({
@@ -782,11 +797,13 @@ export const getAllMedicines = async (req, res) => {
       total: formatted.length,
       medicines: formatted
     });
+
   } catch (error) {
     console.error("Error fetching medicines:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
+
 
 
 

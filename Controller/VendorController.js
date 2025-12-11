@@ -10,6 +10,7 @@ import Query from "../Models/Query.js";
 import Rider from "../Models/Rider.js";
 import User from "../Models/User.js";
 import mongoose from "mongoose";
+import { Notification } from "../Models/Notification.js";
 
 dotenv.config();
 
@@ -463,7 +464,9 @@ export const updateOrderStatusByVendor = async (req, res) => {
 
     const user = order.userId;
 
-    // Handle rejection
+    // ==================================================================
+    // IF VENDOR REJECTS ORDER -> Save Notification
+    // ==================================================================
     if (status === 'Rejected') {
       if (!order.rejectedPharmacies) order.rejectedPharmacies = [];
 
@@ -477,12 +480,27 @@ export const updateOrderStatusByVendor = async (req, res) => {
         timestamp: new Date(),
       });
 
-      // Clear assignedPharmacy since vendor rejected it
       order.assignedPharmacy = null;
 
       await order.save();
 
-      // Schedule reassignment after 5 minutes
+      // 🔔 CREATE NOTIFICATION
+      try {
+        const notif = await Notification.create({
+          type: "Order",
+          referenceId: order._id,
+          vendorId: vendorId,
+          orderId: orderId,
+          message: `Vendor rejected order #${order.bookingNo || order._id}`,
+          status: 'Rejected',
+          timestamp: new Date()
+        });
+        console.log("Notification stored:", notif);
+      } catch (notifErr) {
+        console.error("Error storing notification:", notifErr);
+      }
+
+      // Schedule reassignment
       scheduleReassignOrder(order._id);
 
       return res.status(200).json({
@@ -491,7 +509,9 @@ export const updateOrderStatusByVendor = async (req, res) => {
       });
     }
 
-    // For all other statuses, update status and timeline
+    // ==================================================================
+    // FOR OTHER STATUS UPDATES -> Save Notification
+    // ==================================================================
     order.status = status;
     order.statusTimeline.push({
       status,
@@ -499,7 +519,7 @@ export const updateOrderStatusByVendor = async (req, res) => {
       timestamp: new Date(),
     });
 
-    // Push notification to user
+    // Push in user's notification
     if (user) {
       user.notifications.push({
         orderId: order._id,
@@ -511,7 +531,25 @@ export const updateOrderStatusByVendor = async (req, res) => {
       await user.save();
     }
 
-    // If order accepted, assign nearest rider
+    // 🔔 CREATE NOTIFICATION IN NOTIFICATION SCHEMA
+    try {
+      const notif = await Notification.create({
+        type: "Order",
+        referenceId: order._id,
+        vendorId: vendorId,
+        orderId: orderId,
+        message: `Vendor updated order status to ${status}`,
+        status: "Pending", 
+        timestamp: new Date()
+      });
+      console.log("Notification stored:", notif);
+    } catch (notifErr) {
+      console.error("Error storing notification:", notifErr);
+    }
+
+    // ==================================================================
+    // ASSIGN RIDER IF ACCEPTED
+    // ==================================================================
     if (status === "Accepted" && !order.assignedRider) {
       const allRiders = await Rider.find({ status: 'online' });
       const rejectedRiders = order.rejectedRiders || [];
@@ -546,12 +584,12 @@ export const updateOrderStatusByVendor = async (req, res) => {
 
         order.statusTimeline.push({
           status: "Rider Assigned",
-          message: `Rider ${nearestRider.name} has been assigned with a delivery charge of ${deliveryCharge}.`,
+          message: `Rider ${nearestRider.name} assigned.`,
           timestamp: new Date(),
         });
 
         nearestRider.notifications.push({
-          message: `New order assigned to you from ${user.name}.`,
+          message: `New order assigned to you.`,
           order: {
             _id: order._id,
             user: {
@@ -583,11 +621,13 @@ export const updateOrderStatusByVendor = async (req, res) => {
       message: 'Order status updated successfully.',
       order,
     });
+
   } catch (error) {
     console.error('Error updating order status for vendor:', error);
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
 
 
 const scheduleReassignOrder = (orderId) => {
@@ -1528,18 +1568,18 @@ export const getAllPeriodicOrdersByVendor = async (req, res) => {
       return res.status(404).json({ message: "No periodic orders found for this vendor" });
     }
 
-    // Step 3: Send response
+    // Step 3: Send response with null-safe user check
     return res.status(200).json({
       success: true,
       count: orders.length,
       orders: orders.map(order => ({
         _id: order._id,
-        userId: {
+        userId: order.userId ? {
           _id: order.userId._id,
           name: order.userId.name,
           email: order.userId.email,
           mobile: order.userId.mobile,
-        },
+        } : null,  // 🟢 Safe fallback if userId is null
         deliveryDate: order.deliveryDate,
         deliveryAddress: order.deliveryAddress,
         orderItems: order.orderItems,
@@ -1569,6 +1609,7 @@ export const getAllPeriodicOrdersByVendor = async (req, res) => {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 
 
 
