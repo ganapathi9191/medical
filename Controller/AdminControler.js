@@ -679,6 +679,7 @@ export const updateUserStatus = async (req, res) => {
 
 
 // 📌 Get All Payments (from Orders)
+// 📌 Get All Payments (from Orders)
 export const getAllPayments = async (req, res) => {
   try {
     // Fetch all orders where paymentMethod exists (means payment info available)
@@ -690,7 +691,7 @@ export const getAllPayments = async (req, res) => {
         path: "userId",
         select: "name mobile email profileImage"
       })
-      .select("userId totalAmount paymentMethod status paymentMethod createdAt updatedAt");
+      .select("userId totalAmount paymentMethod status paymentStatus createdAt updatedAt");
     // sirf payment-related fields select kiye
 
     return res.status(200).json({
