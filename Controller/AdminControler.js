@@ -690,7 +690,7 @@ export const getAllPayments = async (req, res) => {
         path: "userId",
         select: "name mobile email profileImage"
       })
-      .select("userId totalAmount paymentMethod status createdAt updatedAt");
+      .select("userId totalAmount paymentMethod status paymentMethod createdAt updatedAt");
     // sirf payment-related fields select kiye
 
     return res.status(200).json({
