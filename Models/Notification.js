@@ -12,7 +12,7 @@ const notificationSchema = new mongoose.Schema({
   message: { type: String, },
   status: { 
     type: String, 
-    enum: ['Pending', 'Seen'], 
+    enum: ['Pending', 'Active','Inactive','Rejected'], 
     default: 'Pending' 
   },
   createdAt: { type: Date, default: Date.now },

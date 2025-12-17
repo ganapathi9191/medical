@@ -373,264 +373,131 @@ const formatTimeTo12Hour = (date) => {
   return `${hours}:${minutes} ${ampm}`;
 };
 
-// Controller to get new orders for the rider
 export const getNewOrdersForRiderController = async (req, res) => {
   try {
     const { riderId } = req.params;
 
-    console.log("🚀 Fetching orders for riderId:", riderId);
-
     if (!mongoose.Types.ObjectId.isValid(riderId)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Invalid rider ID" 
-      });
+      return res.status(400).json({ message: "Invalid rider ID" });
     }
 
-    // Step 1: Check if rider exists
+    // Fetch rider details
     const rider = await Rider.findById(riderId);
     if (!rider) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Rider not found" 
-      });
+      return res.status(404).json({ message: "Rider not found" });
     }
-    console.log("✅ Rider found:", rider.fullName);
-
-    // Step 2: Fetch orders WITHOUT populate first
-    const rawOrders = await Order.find({ 
-      assignedRider: new mongoose.Types.ObjectId(riderId), 
-      assignedRiderStatus: 'Assigned' 
-    }).lean();
-
-    console.log(`📦 Raw orders found: ${rawOrders.length}`);
-    
-    if (rawOrders.length === 0) {
-      return res.status(200).json({ 
-        success: true,
-        message: 'No new orders assigned to you',
-        newOrders: [] 
-      });
-    }
-
-    // Step 3: Log first order to see structure
-    console.log("🔍 First order structure:", JSON.stringify(rawOrders[0], null, 2));
-
-    // Step 4: Now populate with correct paths
-    const newOrders = await Order.find({ 
-      assignedRider: new mongoose.Types.ObjectId(riderId), 
-      assignedRiderStatus: 'Assigned' 
-    })
-    .populate({
-      path: 'orderItems.medicineId',
-      model: 'Medicine', // Specify model name
-      select: 'name mrp description images pharmacyId'
-    })
-    .populate({
-      path: 'assignedPharmacy', // Populate assignedPharmacy directly
-      model: 'Pharmacy', // Specify model name
-      select: 'name address contactNumber latitude longitude'
-    })
-    .populate({
-      path: 'userId',
-      model: 'User', // Specify model name
-      select: 'name mobile location'
-    })
-    .lean();
-
-    console.log(`✅ Orders after populate: ${newOrders.length}`);
-
-    if (newOrders.length === 0) {
-      return res.status(200).json({ 
-        success: true,
-        message: 'No new orders assigned to you',
-        newOrders: [] 
-      });
-    }
-
-    // Step 5: Debug populate results
-    const firstOrder = newOrders[0];
-    console.log("🔍 First order after populate:");
-    console.log("- OrderItems length:", firstOrder.orderItems?.length);
-    console.log("- First medicineId:", firstOrder.orderItems?.[0]?.medicineId);
-    console.log("- Medicine populated:", firstOrder.orderItems?.[0]?.medicineId?.name);
-    console.log("- Pharmacy in medicine:", firstOrder.orderItems?.[0]?.medicineId?.pharmacyId);
-    console.log("- AssignedPharmacy:", firstOrder.assignedPharmacy);
-    console.log("- User populated:", firstOrder.userId?.name);
 
     const riderLat = parseFloat(rider.latitude);
     const riderLon = parseFloat(rider.longitude);
     const deliveryCharge = parseFloat(rider.deliveryCharge) || 0;
 
-    // Helper functions
-    const calculateDistance = (point1, point2) => {
-      const [lon1, lat1] = point1;
-      const [lon2, lat2] = point2;
-      
-      const R = 6371; // Earth's radius in kilometers
-      const dLat = (lat2 - lat1) * Math.PI / 180;
-      const dLon = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
-    };
+    // Fetch new orders
+    const newOrders = await Order.find({
+      assignedRider: riderId,
+      assignedRiderStatus: "Assigned"
+    })
+      .populate({
+        path: "orderItems.medicineId",
+        select: "name mrp description images pharmacyId",
+        populate: {
+          path: "pharmacyId",
+          select: "name address contactNumber latitude longitude"
+        }
+      })
+      .populate({
+        path: "userId",
+        select: "name mobile location"
+      })
+      .lean();
 
-    const calculateTime = (distance) => {
-      const averageSpeed = 20; // km/h
-      const timeInHours = distance / averageSpeed;
-      return timeInHours * 60;
-    };
+    if (!newOrders || newOrders.length === 0) {
+      return res.status(404).json({ message: "No new orders assigned to you" });
+    }
 
-    const addMinutesToTime = (date, minutes) => {
-      return new Date(date.getTime() + minutes * 60000);
-    };
-
-    const formatTimeTo12Hour = (date) => {
-      return date.toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true
-      });
-    };
-
-    // Step 6: Process orders - Use assignedPharmacy instead of medicine.pharmacyId
-    const updatedOrders = newOrders.map(order => {
-      console.log(`\n🔧 Processing order: ${order._id}`);
-      
-      if (!order.orderItems || order.orderItems.length === 0) {
-        console.log("❌ Order has no items");
-        return null;
-      }
-
-      // Use assignedPharmacy instead of medicine.pharmacyId
-      const pharmacy = order.assignedPharmacy;
-      
-      if (!pharmacy) {
-        console.log("❌ No assigned pharmacy found");
-        // Try to get pharmacy from medicine if available
-        const firstMedicine = order.orderItems[0]?.medicineId;
-        if (firstMedicine?.pharmacyId) {
-          console.log("⚠️ Using pharmacy from medicine");
-          // In this case, you might need to populate it differently
-        } else {
+    // Process orders
+    const updatedOrders = newOrders
+      .map(order => {
+        const firstItem = order.orderItems[0]?.medicineId;
+        if (!firstItem || !firstItem.pharmacyId) {
           return null;
         }
-      }
 
-      const user = order.userId;
-      if (!user) {
-        console.log("❌ User not found");
-        return null;
-      }
+        const pharmacy = firstItem.pharmacyId;
 
-      // Check user location - could be in different formats
-      let userLocation = null;
-      if (user.location && user.location.coordinates) {
-        userLocation = user.location.coordinates;
-      } else if (Array.isArray(user.location)) {
-        userLocation = user.location;
-      } else if (user.location && user.location.longitude && user.location.latitude) {
-        userLocation = [user.location.longitude, user.location.latitude];
-      }
-
-      console.log("📍 Pharmacy location:", pharmacy?.latitude, pharmacy?.longitude);
-      console.log("📍 User location:", userLocation);
-
-      if (!pharmacy || !pharmacy.longitude || !pharmacy.latitude) {
-        console.log("❌ Pharmacy location missing");
-        return null;
-      }
-
-      if (!userLocation || userLocation.length < 2) {
-        console.log("❌ User location missing or invalid");
-        console.log("User object:", JSON.stringify(user, null, 2));
-        return null;
-      }
-
-      // Calculate distances
-      const pickupDistance = calculateDistance(
-        [riderLon, riderLat], 
-        [parseFloat(pharmacy.longitude), parseFloat(pharmacy.latitude)]
-      );
-
-      const dropDistance = calculateDistance(
-        [parseFloat(pharmacy.longitude), parseFloat(pharmacy.latitude)], 
-        [parseFloat(userLocation[0]), parseFloat(userLocation[1])]
-      );
-
-      // Calculate times
-      const pickupTime = calculateTime(pickupDistance);
-      const dropTime = calculateTime(dropDistance);
-
-      // Format times
-      const orderDate = new Date(order.createdAt);
-      const pickupTimeEstimate = addMinutesToTime(orderDate, pickupTime);
-      const dropTimeEstimate = addMinutesToTime(orderDate, pickupTime + dropTime);
-
-      const formattedPickupTime = formatTimeTo12Hour(pickupTimeEstimate);
-      const formattedDropTime = formatTimeTo12Hour(dropTimeEstimate);
-
-      // Billing calculations
-      const totalItems = order.orderItems.length;
-      let subTotal = 0;
-
-      order.orderItems.forEach(item => {
-        const mrp = item?.medicineId?.mrp || 0;
-        const quantity = item?.quantity || 1;
-        subTotal += mrp * quantity;
-      });
-
-      const platformFee = order.platformFee || 10;
-      const estimatedEarning = deliveryCharge;
-      const totalPaid = subTotal + platformFee + deliveryCharge;
-
-      return {
-        order: {
-          _id: order._id,
-          orderId: `ORD${order._id.toString().substring(0, 8).toUpperCase()}`,
-          userId: order.userId,
-          deliveryAddress: order.deliveryAddress,
-          orderItems: order.orderItems,
-          totalAmount: order.totalAmount,
-          status: order.status,
-          notes: order.notes,
-          paymentMethod: order.paymentMethod,
-          createdAt: order.createdAt,
-          assignedPharmacy: pharmacy
-        },
-        pickupDistance: `${pickupDistance.toFixed(2)} km`,
-        dropDistance: `${dropDistance.toFixed(2)} km`,
-        pickupTime: formattedPickupTime,
-        dropTime: formattedDropTime,
-        estimatedEarning: `₹${estimatedEarning.toFixed(2)}`,
-        billingDetails: {
-          totalItems,
-          subTotal: `₹${subTotal.toFixed(2)}`,
-          platformFee: `₹${platformFee.toFixed(2)}`,
-          deliveryCharge: `₹${deliveryCharge.toFixed(2)}`,
-          totalPaid: `₹${totalPaid.toFixed(2)}`
+        // User Location Check
+        const userLocation = order.userId?.location?.coordinates;
+        if (!userLocation || userLocation.length !== 2) {
+          console.log("⚠️ Missing user location for order:", order._id);
+          return null;
         }
-      };
-    }).filter(order => order !== null);
 
-    console.log(`🎯 Final orders to return: ${updatedOrders.length}`);
+        const pharmacyLat = parseFloat(pharmacy.latitude);
+        const pharmacyLon = parseFloat(pharmacy.longitude);
 
-    return res.status(200).json({ 
+        // Distance calculations
+        const pickupDistance = calculateDistance(
+          [riderLon, riderLat],
+          [pharmacyLon, pharmacyLat]
+        );
+
+        const dropDistance = calculateDistance(
+          [pharmacyLon, pharmacyLat],
+          [userLocation[0], userLocation[1]]
+        );
+
+        // Time estimation from CURRENT TIME
+        const now = new Date();
+        const pickupMinutes = calculateTime(pickupDistance);
+        const dropMinutes = calculateTime(dropDistance);
+
+        const pickupEstimate = addMinutesToTime(now, pickupMinutes);
+        const dropEstimate = addMinutesToTime(now, pickupMinutes + dropMinutes);
+
+        const formattedPickup = formatTimeTo12Hour(pickupEstimate);
+        const formattedDrop = formatTimeTo12Hour(dropEstimate);
+
+        // Billing calculation
+        let subTotal = 0;
+        order.orderItems.forEach(item => {
+          const mrp = item?.medicineId?.mrp || 0;
+          const quantity = item?.quantity || 1;
+          subTotal += mrp * quantity;
+        });
+
+        const platformFee = 10;
+        const totalPaid = subTotal + platformFee + deliveryCharge;
+
+        return {
+          orderId: order._id,
+          pickupDistance: `${pickupDistance.toFixed(2)} km`,
+          dropDistance: `${dropDistance.toFixed(2)} km`,
+          pickupTime: formattedPickup,
+          dropTime: formattedDrop,
+          estimatedEarning: `₹${deliveryCharge.toFixed(2)}`,
+
+          billingDetails: {
+            totalItems: order.orderItems.length,
+            subTotal: `₹${subTotal.toFixed(2)}`,
+            platformFee: `₹${platformFee.toFixed(2)}`,
+            deliveryCharge: `₹${deliveryCharge.toFixed(2)}`,
+            totalPaid: `₹${totalPaid.toFixed(2)}`
+          },
+
+          order // original order object
+        };
+      })
+      .filter(order => order !== null);
+
+    return res.status(200).json({
       success: true,
-      message: updatedOrders.length > 0 ? 'New orders fetched successfully' : 'No orders with complete location data',
-      newOrders: updatedOrders 
+      newOrders: updatedOrders
     });
   } catch (error) {
-    console.error("❌ Error fetching new orders for rider:", error);
-    return res.status(500).json({ 
-      success: false,
-      message: "Server error while fetching new orders.",
-      error: error.message 
-    });
+    console.error("Error fetching new orders for rider:", error);
+    return res.status(500).json({ message: "Server error while fetching new orders." });
   }
 };
+
 
 
 
@@ -2071,7 +1938,7 @@ export const uploadMedicineProof = async (req, res) => {
 
     // Get first medicine from order to find pharmacy
     if (!order.orderItems || order.orderItems.length === 0) {
-      return res.status(400).json({ message: "No medicine items found in order" });
+      return res.status(202).json({ message: "No medicine items found in order" });
     }
 
     const firstMedicineId = order.orderItems[0].medicineId;

@@ -253,11 +253,11 @@ export const createMedicine = async (req, res) => {
         });
         images.push(uploaded.secure_url);
       }
-    } 
+    }
     // 🌐 Case 2: images URLs passed in body.images (array)
     else if (Array.isArray(req.body.images)) {
       images = req.body.images.filter(img => typeof img === 'string' && img.startsWith('http'));
-    } 
+    }
     else {
       return res.status(400).json({ message: 'Images are required (upload or URL)' });
     }
@@ -412,6 +412,7 @@ export const getAllOrdersByVendor = async (req, res) => {
 
     // Find all orders assigned to this vendor pharmacy
     const orders = await Order.find({ assignedPharmacy: vendorId })
+      .populate("orderItems.medicineId", "price mrp name") // ✅ IMPORTANT
       .populate("assignedRider")
       .sort({ createdAt: -1 });
 
@@ -539,7 +540,7 @@ export const updateOrderStatusByVendor = async (req, res) => {
         vendorId: vendorId,
         orderId: orderId,
         message: `Vendor updated order status to ${status}`,
-        status: "Pending", 
+        status: "Pending",
         timestamp: new Date()
       });
       console.log("Notification stored:", notif);
@@ -719,19 +720,26 @@ export const getVendorDashboard = async (req, res) => {
       return res.status(404).json({ message: "Pharmacy not found" });
     }
 
-    const vendorMedicines = await Medicine.find({ pharmacyId: vendorId }, "_id");
-    const medicineIds = vendorMedicines.map(m => m._id);
-
+    // ----------------------------
+    // TOTAL ORDERS (FIXED)
+    // ----------------------------
     const totalOrders = await Order.countDocuments({
-      "orderItems.medicineId": { $in: medicineIds }
+      assignedPharmacy: vendorId
     });
 
+    // ----------------------------
+    // MEDICINES COUNT (UNCHANGED)
+    // ----------------------------
+    const vendorMedicines = await Medicine.find({ pharmacyId: vendorId }, "_id");
     const medicinesCount = vendorMedicines.length;
 
+    // ----------------------------
+    // TOTAL REVENUE (FIXED)
+    // ----------------------------
     const revenueAgg = await Order.aggregate([
       {
         $match: {
-          "orderItems.medicineId": { $in: medicineIds },
+          assignedPharmacy: new mongoose.Types.ObjectId(vendorId),
           status: { $ne: "Cancelled" }
         }
       },
@@ -744,29 +752,40 @@ export const getVendorDashboard = async (req, res) => {
     ]);
     const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
 
+    // ----------------------------
+    // TODAY DATE RANGE
+    // ----------------------------
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-const todaysOrders = await Order.countDocuments({
-  "orderItems.medicineId": { $in: medicineIds },
-  createdAt: { $gte: startOfToday }
-});
+    // ----------------------------
+    // TODAY'S ORDERS (FIXED)
+    // ----------------------------
+    const todaysOrders = await Order.countDocuments({
+      assignedPharmacy: vendorId,
+      createdAt: { $gte: startOfToday }
+    });
 
-
+    // ----------------------------
+    // TODAY'S DELIVERED ORDERS (FIXED)
+    // ----------------------------
     const ordersDelivered = await Order.countDocuments({
-      "orderItems.medicineId": { $in: medicineIds },
+      assignedPharmacy: vendorId,
       status: "Delivered",
       updatedAt: { $gte: startOfToday }
     });
 
+    // ----------------------------
+    // PENDING DELIVERIES (FIXED)
+    // ----------------------------
     const pendingDeliveries = await Order.countDocuments({
-      "orderItems.medicineId": { $in: medicineIds },
-      status: { $in: ["Pending", "Shipped"] }
+      assignedPharmacy: vendorId,
+      status: { $in: ["Pending", "Accepted", "Shipped", "Payment Pending"] }
     });
 
-
-    
-
+    // ----------------------------
+    // DATE RANGE LOGIC (UNCHANGED)
+    // ----------------------------
     const now = new Date();
     let startDate;
 
@@ -791,10 +810,13 @@ const todaysOrders = await Order.countDocuments({
     const dateFormat = isToday ? "%H:%M" : "%d-%b";
     const dateLabels = generateDateLabels(startDate, now, isToday);
 
+    // ----------------------------
+    // REVENUE TREND (FIXED)
+    // ----------------------------
     const revenueDataRaw = await Order.aggregate([
       {
         $match: {
-          "orderItems.medicineId": { $in: medicineIds },
+          assignedPharmacy: new mongoose.Types.ObjectId(vendorId),
           createdAt: { $gte: startDate, $lte: now },
           status: { $ne: "Cancelled" }
         }
@@ -828,10 +850,13 @@ const todaysOrders = await Order.countDocuments({
       revenue: revenueMap[label] || 0
     }));
 
+    // ----------------------------
+    // ORDER TREND (FIXED)
+    // ----------------------------
     const orderDataRaw = await Order.aggregate([
       {
         $match: {
-          "orderItems.medicineId": { $in: medicineIds },
+          assignedPharmacy: new mongoose.Types.ObjectId(vendorId),
           createdAt: { $gte: startDate, $lte: now }
         }
       },
@@ -863,13 +888,15 @@ const todaysOrders = await Order.countDocuments({
       count: orderMap[label] || 0
     }));
 
-    // ✅ Final response
+    // ----------------------------
+    // FINAL RESPONSE
+    // ----------------------------
     return res.status(200).json({
       summary: {
         orders: totalOrders,
         medicinesCount,
         revenue: totalRevenue,
-        todaysOrders: todaysOrders  // Add today's orders count here
+        todaysOrders
       },
       today: {
         ordersPlaced: todaysOrders,
@@ -880,7 +907,6 @@ const todaysOrders = await Order.countDocuments({
         revenueTrend,
         orderTrend
       },
-      // ✅ Include revenueByMonth & paymentStatus here
       revenueByMonth: pharmacy.revenueByMonth || {},
       paymentStatus: pharmacy.paymentStatus || {}
     });
@@ -890,6 +916,7 @@ const todaysOrders = await Order.countDocuments({
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 
 
 export const vendorLogout = async (req, res) => {
@@ -929,7 +956,7 @@ export const getMessagesForVendor = async (req, res) => {
     const messages = await Message.find({
       vendorIds: vendorId // We check if vendorId is part of the vendorIds array in the message
     })
-    .sort({ sentAt: -1 }); // Sort messages by sentAt in descending order
+      .sort({ sentAt: -1 }); // Sort messages by sentAt in descending order
 
     if (messages.length === 0) {
       return res.status(404).json({ message: "No messages found for this vendor" });
@@ -1299,6 +1326,7 @@ export const getPrescriptionOrdersByVendor = async (req, res) => {
       'orderItems.medicineId': { $in: medicineIds },
       isPrescriptionOrder: true,  // Only fetch prescription orders
     })
+      .populate("orderItems.medicineId", "price mrp name") // ✅ IMPORTANT
       .populate("assignedRider")  // Populate assigned rider details
       .populate("userId", "userId name email mobile") // Populate user details: name, email, and phone
       .sort({ createdAt: -1 }); // Sort orders by newest first
@@ -1433,18 +1461,33 @@ export const createOrderFromPrescription = async (req, res) => {
       country: userAddress.country,
     };
 
-    // Manually creating order items based on vendor's manual entry, now using MRP instead of price
-    const orderItems = medicineDetails.map((item) => ({
+    // ✅ FETCH MEDICINE PRICES
+    const medicineIds = medicineDetails.map(i => i.medicineId);
+
+    const medicines = await Medicine.find(
+      { _id: { $in: medicineIds } },
+      { price: 1, mrp: 1 }
+    );
+
+    const medicinePriceMap = {};
+    medicines.forEach(med => {
+      medicinePriceMap[med._id.toString()] = med.price ?? med.mrp ?? 0;
+    });
+
+    // ✅ CREATE ORDER ITEMS WITH PRICE
+    const orderItems = medicineDetails.map(item => ({
       medicineId: item.medicineId,
       name: item.name,
       quantity: item.quantity,
-      mrp: item.mrp,  // MRP instead of price
+      price: medicinePriceMap[item.medicineId.toString()] ?? 0,
       dosage: item.dosage,
       instructions: item.instructions,
     }));
 
-    // Calculate Subtotal (price of all items without taxes/discounts)
-    const subtotal = orderItems.reduce((acc, item) => acc + item.mrp * item.quantity, 0);
+    const subtotal = orderItems.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
 
     // Optional: Add tax, discounts, shipping fees, etc.
     const taxRate = 0.18;  // Example: 18% tax
@@ -1560,6 +1603,7 @@ export const getAllPeriodicOrdersByVendor = async (req, res) => {
       'orderItems.medicineId': { $in: medicineIds },
       planType: { $exists: true, $ne: null }, // Orders with defined planType (periodic orders)
     })
+      .populate('orderItems.medicineId', 'price mrp name') // ✅ IMPORTANT
       .populate('assignedRider', 'name phone') // Populate assigned rider info
       .populate('userId', 'name email mobile') // Populate user info
       .sort({ deliveryDate: -1 }); // Sort orders by deliveryDate descending
@@ -1582,7 +1626,16 @@ export const getAllPeriodicOrdersByVendor = async (req, res) => {
         } : null,  // 🟢 Safe fallback if userId is null
         deliveryDate: order.deliveryDate,
         deliveryAddress: order.deliveryAddress,
-        orderItems: order.orderItems,
+        orderItems: order.orderItems.map(item => ({
+          medicineId: item.medicineId?._id ?? item.medicineId,
+          name: item.name ?? item.medicineId?.name,
+          quantity: item.quantity,
+          price:
+            item.price ??
+            item.medicineId?.price ??
+            item.medicineId?.mrp ??
+            0,
+        })),
         subtotal: order.subtotal,
         total: order.total,
         deliveryCharge: order.deliveryCharge,

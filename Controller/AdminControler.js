@@ -99,8 +99,14 @@ export const updateOrderStatus = async (req, res) => {
   const { userId, orderId } = req.params;
   const { status, message } = req.body;
 
-  if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(orderId)) {
-    return res.status(400).json({ message: 'Invalid user or order ID' });
+  // Validate ObjectIds
+  if (!mongoose.Types.ObjectId.isValid(orderId)) {
+    return res.status(400).json({ message: 'Invalid order ID' });
+  }
+
+  // If userId is provided, validate it
+  if (userId && !mongoose.Types.ObjectId.isValid(userId)) {
+    return res.status(400).json({ message: 'Invalid user ID' });
   }
 
   if (!status || !message) {
@@ -108,13 +114,33 @@ export const updateOrderStatus = async (req, res) => {
   }
 
   try {
-    // 🧾 Find and validate order
+    // Find the order
     const order = await Order.findById(orderId);
-    if (!order || order.userId.toString() !== userId) {
-      return res.status(404).json({ message: 'Order not found for this user' });
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
     }
 
-    // 🛠️ Update current status & push status timeline
+    // For admin, we might not need strict user-order matching
+    // But if userId is provided in params, we can optionally validate
+    if (userId && order.userId && order.userId.toString() !== userId) {
+      console.warn(`Order ${orderId} does not belong to user ${userId}`);
+      // You might want to proceed anyway for admin or return error
+      // return res.status(403).json({ message: 'Order does not belong to this user' });
+    }
+
+    // Validate status against enum values from Order schema
+    const validStatuses = ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled', 
+                          'Refunded', 'Assigned', 'Accepted', 'Rejected', 'In Progress', 
+                          'Completed', 'PickedUp', 'Failed'];
+    
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ 
+        message: 'Invalid status', 
+        validStatuses 
+      });
+    }
+
+    // Update current status & push status timeline
     order.status = status;
     order.statusTimeline.push({
       status,
@@ -124,28 +150,54 @@ export const updateOrderStatus = async (req, res) => {
 
     await order.save();
 
-    // 🛎️ Push new notification to user
-    const newNotification = {
-      orderId: order._id,
-      status,
-      message,
-      timestamp: new Date(),
-      read: false
-    };
+    // Create notification in the Notification collection (not in User)
+    try {
+      const notification = new Notification({
+        type: 'Order',
+        referenceId: order._id,
+        message: `Order ${order._id}: ${status} - ${message}`,
+        status: 'Pending' // Default status
+      });
 
-    await User.findByIdAndUpdate(userId, {
-      $push: { notifications: newNotification }
-    });
+      await notification.save();
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the whole request if notification fails
+    }
+
+    // Optionally update user's notifications if User model has that field
+    try {
+      if (order.userId) {
+        await User.findByIdAndUpdate(order.userId, {
+          $push: { 
+            notifications: {
+              orderId: order._id,
+              status,
+              message,
+              timestamp: new Date(),
+              read: false
+            }
+          }
+        });
+      }
+    } catch (userNotifError) {
+      console.error('Failed to update user notifications:', userNotifError);
+      // Continue anyway
+    }
 
     return res.status(200).json({
-      message: 'Order status updated and notification sent',
+      message: 'Order status updated successfully',
       status,
-      orderId
+      orderId: order._id,
+      timelineEntry: order.statusTimeline[order.statusTimeline.length - 1]
     });
 
   } catch (error) {
     console.error('Error updating status:', error);
-    return res.status(500).json({ message: 'Server error', error: error.message });
+    return res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 };
 
@@ -521,7 +573,7 @@ export const getInactivePharmacies = async (req, res) => {
 
     // If no inactive pharmacies found, return an appropriate message
     if (!inactivePharmacies || inactivePharmacies.length === 0) {
-      return res.status(404).json({
+      return res.status(202).json({
         message: "No inactive pharmacies found",
       });
     }
@@ -1992,10 +2044,14 @@ export const getAllPreodicOrders = async (req, res) => {
       count: orders.length,
       orders: orders.map(order => ({
         _id: order._id,
-        userId: {
+        userId: order.userId ? {
           _id: order.userId._id,
-          name: order.userId.name,
-          mobile: order.userId.mobile,
+          name: order.userId.name || "Unknown",
+          mobile: order.userId.mobile || "N/A",
+        } : {
+          _id: null,
+          name: "User Not Found",
+          mobile: "N/A"
         },
         deliveryDate: order.deliveryDate,
         deliveryAddress: order.deliveryAddress,
@@ -2013,8 +2069,8 @@ export const getAllPreodicOrders = async (req, res) => {
         voiceNoteUrl: order.voiceNoteUrl,
         assignedRider: order.assignedRider ? {
           _id: order.assignedRider._id,
-          name: order.assignedRider.name,
-          phone: order.assignedRider.phone,
+          name: order.assignedRider.name || "Unknown",
+          phone: order.assignedRider.phone || "N/A",
         } : null,
         assignedRiderStatus: order.assignedRiderStatus,
         createdAt: order.createdAt,
@@ -2030,28 +2086,96 @@ export const getAllPreodicOrders = async (req, res) => {
 
 
 
+
 // Update Order Controller
 export const updatePeriodicOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const updateData = req.body;
+    const { status, message, ...updateFields } = req.body;
 
+    // Validate Mongo ID
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid orderId"
+      });
+    }
+
+    // Fetch order
     const order = await Order.findById(orderId);
 
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Order not found"
+      });
     }
 
-    Object.assign(order, updateData);
+    // Must be periodic
+    if (!order.planType) {
+      return res.status(400).json({
+        success: false,
+        message: "This is not a periodic order"
+      });
+    }
+
+    // --- STATUS & MESSAGE HANDLING ---
+    if (status || message) {
+      if (!status || !message) {
+        return res.status(400).json({
+          success: false,
+          message: "Both status and message are required for status update"
+        });
+      }
+
+      const validStatuses = [
+        "Pending", "Confirmed", "Shipped", "Delivered", "Cancelled",
+        "Refunded", "Assigned", "Accepted", "Rejected", "In Progress",
+        "Completed", "PickedUp", "Failed"
+      ];
+
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status value",
+          validStatuses
+        });
+      }
+
+      // Update main status
+      order.status = status;
+
+      // Push into timeline
+      order.statusTimeline.push({
+        status,
+        message,
+        timestamp: new Date()
+      });
+    }
+
+    // --- UPDATE OTHER FIELDS SAFELY ---
+    Object.keys(updateFields).forEach((key) => {
+      if (updateFields[key] !== undefined && updateFields[key] !== null) {
+        order[key] = updateFields[key];
+      }
+    });
+
     await order.save();
 
-    res.status(200).json({
-      message: "Order updated successfully",
-      order,
+    return res.status(200).json({
+      success: true,
+      message: "Periodic order updated successfully",
+      order
     });
+
   } catch (error) {
-    console.error("Error updating the order:", error);
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error updating periodic order:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
   }
 };
 
@@ -2115,8 +2239,6 @@ export const getAllFaqs = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
-
 
 // Delete FAQ by ID
 export const deleteFaq = async (req, res) => {

@@ -695,7 +695,18 @@ export const addToCart = async (req, res) => {
 
     cart.subTotal = subTotal;
     cart.platformFee = 10; // fixed platform fee
-    cart.deliveryCharge = 0; // fixed delivery charge
+
+    // ✅ Fetch delivery charge (baseFare) set by admin
+    const riderData = await Rider.findOne();
+    let deliveryCharge = 0;
+
+    if (riderData && riderData.baseFare !== undefined) {
+      deliveryCharge = riderData.baseFare;
+    }
+
+    cart.deliveryCharge = deliveryCharge;
+
+    // Total payable calculation
     cart.totalPayable = cart.subTotal + cart.platformFee + cart.deliveryCharge;
 
     await cart.save();
@@ -730,8 +741,15 @@ export const getCart = async (req, res) => {
         }
       });
 
+    // ⭐ Fetch delivery charge (admin baseFare)
+    const riderData = await Rider.findOne();
+    let deliveryCharge = 0;
+
+    if (riderData && riderData.baseFare !== undefined) {
+      deliveryCharge = riderData.baseFare;
+    }
+
     if (!cart) {
-      // Cart nahi mila, empty response with zero values
       return res.status(200).json({
         message: 'Cart fetched successfully',
         cart: {
@@ -748,7 +766,6 @@ export const getCart = async (req, res) => {
     const totalItems = cart.items.reduce((acc, item) => acc + item.quantity, 0);
 
     if (totalItems === 0) {
-      // Cart hai par items nahi, sab zero show karo
       return res.status(200).json({
         message: 'Cart fetched successfully',
         cart: {
@@ -762,7 +779,6 @@ export const getCart = async (req, res) => {
       });
     }
 
-    // Items hain, fixed platformFee and deliveryCharge dikhao
     return res.status(200).json({
       message: 'Cart fetched successfully',
       cart: {
@@ -778,9 +794,9 @@ export const getCart = async (req, res) => {
         })),
         totalItems,
         subTotal: cart.subTotal,
-        platformFee: 10,     // static value shown only if items exist
-        deliveryCharge: 0,  // static value shown only if items exist
-        totalPayable: cart.subTotal + 10 + 0
+        platformFee: 10,
+        deliveryCharge: deliveryCharge,     // ⭐ dynamic
+        totalPayable: cart.subTotal + 10 + deliveryCharge  // ⭐ dynamic
       }
     });
 
@@ -789,6 +805,7 @@ export const getCart = async (req, res) => {
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
 
 
 
@@ -1002,59 +1019,193 @@ export const createBookingFromCart = async (req, res) => {
       }
     }
 
-    // Payment verification (if not COD)
+    // 🔄 PAYMENT VERIFICATION - UPDATED FOR NETBANKING
     let paymentStatus = "Pending";
     let verifiedPaymentDetails = null;
+    let isNetbanking = paymentMethod.toLowerCase().includes('netbanking');
+
     if (paymentMethod !== "Cash on Delivery") {
       console.log(`💳 Online payment with transaction ID: ${transactionId}`);
+      
       if (!transactionId) {
-        return res
-          .status(400)
-          .json({ message: "Transaction ID is required for online payments" });
+        return res.status(400).json({ 
+          message: "Transaction ID is required for online payments" 
+        });
       }
 
       try {
+        // Validate Razorpay is initialized
+        if (!razorpay || !razorpay.payments) {
+          throw new Error("Payment gateway not initialized");
+        }
+
+        console.log(`🔍 Verifying payment with Razorpay: ${transactionId}`);
+        
+        // Fetch payment info
         const paymentInfo = await razorpay.payments.fetch(transactionId);
+        
         if (!paymentInfo) {
-          return res.status(404).json({ message: "Payment not found" });
-        }
-
-        if (paymentInfo.status === "authorized") {
-          await razorpay.payments.capture(transactionId, totalPayable * 100, "INR");
-        }
-
-        verifiedPaymentDetails = await razorpay.payments.fetch(transactionId);
-        if (verifiedPaymentDetails.status !== "captured") {
-          return res.status(400).json({
-            message: `Payment not captured. Status: ${verifiedPaymentDetails.status}`,
+          return res.status(404).json({ 
+            message: "Payment not found" 
           });
         }
 
-        paymentStatus = "Captured";
-        console.log(`✅ Payment captured successfully: ${transactionId}`);
+        console.log(`📊 Payment details:`, {
+          id: paymentInfo.id,
+          status: paymentInfo.status,
+          method: paymentInfo.method,
+          bank: paymentInfo.bank,
+          amount: paymentInfo.amount / 100 + " INR"
+        });
+
+        // Check if it's netbanking
+        const paymentMethodType = paymentInfo.method || 'unknown';
+        isNetbanking = paymentMethodType === 'netbanking' || isNetbanking;
+
+        // 🏦 SPECIAL HANDLING FOR NETBANKING
+        if (isNetbanking) {
+          console.log("🏦 Netbanking payment detected");
+          
+          if (paymentInfo.status === 'captured') {
+            console.log("✅ Netbanking payment already captured");
+            verifiedPaymentDetails = paymentInfo;
+            paymentStatus = "Captured";
+          } 
+          else if (paymentInfo.status === 'authorized') {
+            console.log("🔄 Netbanking payment authorized, attempting capture...");
+            
+            try {
+              const amountInPaise = Math.round(totalPayable * 100);
+              await razorpay.payments.capture(transactionId, amountInPaise, "INR");
+              
+              verifiedPaymentDetails = await razorpay.payments.fetch(transactionId);
+              
+              if (verifiedPaymentDetails.status === 'captured') {
+                paymentStatus = "Captured";
+                console.log("✅ Netbanking payment captured successfully");
+              } else {
+                console.log(`⚠️ Netbanking payment status after capture: ${verifiedPaymentDetails.status}`);
+                // For netbanking, allow authorized status to proceed
+                paymentStatus = "Authorized";
+              }
+            } catch (captureError) {
+              console.error("❌ Netbanking capture error:", captureError.error?.description || captureError.message);
+              
+              // Check if payment is already successful
+              const recheckPayment = await razorpay.payments.fetch(transactionId);
+              if (recheckPayment.status === 'captured') {
+                verifiedPaymentDetails = recheckPayment;
+                paymentStatus = "Captured";
+                console.log("✅ Payment verified as captured on recheck");
+              } else {
+                // Allow netbanking in authorized state
+                verifiedPaymentDetails = recheckPayment;
+                paymentStatus = "Authorized";
+                console.log("⚠️ Netbanking payment authorized (capture may be delayed)");
+              }
+            }
+          }
+          else if (paymentInfo.status === 'failed') {
+            return res.status(400).json({
+              message: "Netbanking payment failed. Please try again or use a different payment method.",
+              status: paymentInfo.status,
+            });
+          }
+          else {
+            // For other statuses (created, pending)
+            console.log(`⚠️ Netbanking payment in ${paymentInfo.status} state`);
+            
+            // Allow to proceed and let webhook update later
+            verifiedPaymentDetails = paymentInfo;
+            paymentStatus = "Processing";
+            
+            // Check for known immediate banks
+            const immediateBanks = ['HDFC', 'ICICI', 'SBI', 'AXIS'];
+            const bankCode = paymentInfo.bank || '';
+            
+            if (immediateBanks.some(bank => bankCode.includes(bank))) {
+              console.log(`✅ Allowing ${bankCode} netbanking to proceed`);
+              paymentStatus = "Processing";
+            }
+          }
+        } 
+        // 💳 HANDLE OTHER PAYMENT METHODS
+        else {
+          console.log(`💳 ${paymentMethodType.toUpperCase()} payment detected`);
+          
+          if (paymentInfo.status === 'captured') {
+            verifiedPaymentDetails = paymentInfo;
+            paymentStatus = "Captured";
+          }
+          else if (paymentInfo.status === 'authorized') {
+            console.log(`🔄 ${paymentMethodType} payment authorized, capturing...`);
+            
+            const amountInPaise = Math.round(totalPayable * 100);
+            await razorpay.payments.capture(transactionId, amountInPaise, "INR");
+            
+            verifiedPaymentDetails = await razorpay.payments.fetch(transactionId);
+            
+            if (verifiedPaymentDetails.status === 'captured') {
+              paymentStatus = "Captured";
+              console.log(`✅ ${paymentMethodType} payment captured successfully`);
+            } else {
+              return res.status(400).json({
+                message: `Payment not captured. Status: ${verifiedPaymentDetails.status}`,
+              });
+            }
+          }
+          else if (paymentInfo.status === 'failed') {
+            return res.status(400).json({
+              message: "Payment failed. Please try again or use a different payment method.",
+              status: paymentInfo.status,
+            });
+          }
+          else {
+            console.log(`⚠️ Payment in ${paymentInfo.status} state`);
+            verifiedPaymentDetails = paymentInfo;
+            paymentStatus = paymentInfo.status.charAt(0).toUpperCase() + paymentInfo.status.slice(1);
+          }
+        }
+
+        console.log(`🎯 Final payment status: ${paymentStatus}`);
+
       } catch (err) {
-        console.error("❌ Razorpay verification error:", err);
-        return res
-          .status(500)
-          .json({ message: "Payment verification failed", error: err.message });
+        console.error("❌ Payment verification error:", err.error || err.message);
+        
+        // User-friendly error messages
+        let errorMessage = "Payment processing failed. Please try again or use a different payment method.";
+        
+        if (err.error?.code === 'BAD_REQUEST_ERROR') {
+          if (err.error.description?.includes("already been captured")) {
+            errorMessage = "Payment already processed. Please check your order history.";
+          } else if (err.error.description?.includes("authorized")) {
+            errorMessage = "Payment authorization pending. Please wait a moment.";
+          }
+        }
+        
+        return res.status(500).json({
+          message: errorMessage,
+          error: process.env.NODE_ENV === 'development' ? err.message : undefined,
+        });
       }
     } else {
       console.log(`💵 Cash on Delivery selected`);
+      paymentStatus = "Pending";
     }
 
     // ------------------------------------------------------------
-    // 🧭 SMART PHARMACY FINDER - Works with any coordinate format
+    // 🧭 SMART PHARMACY FINDER
     // ------------------------------------------------------------
     console.log("\n🔍 Finding nearest pharmacy...");
     let selectedPharmacy = null;
     let activePharmacies = [];
-    
+
     // Get user coordinates
     const [userLng, userLat] = user.location?.coordinates || [];
-    
+
     if (userLng && userLat) {
       console.log(`📍 User coordinates: [${userLng}, ${userLat}]`);
-      
+
       // METHOD 1: Try normal geospatial search
       try {
         console.log(`🔎 Method 1: Searching with coordinates [${userLng}, ${userLat}]`);
@@ -1066,11 +1217,11 @@ export const createBookingFromCart = async (req, res) => {
                 type: "Point",
                 coordinates: [userLng, userLat],
               },
-              $maxDistance: 100000, // 100 km (increased)
+              $maxDistance: 100000,
             },
           },
         }).limit(5);
-        
+
         console.log(`✅ Method 1 found: ${activePharmacies.length} pharmacies`);
         if (activePharmacies.length > 0) {
           console.log(`🏥 Pharmacies found: ${activePharmacies.map(p => p.name).join(', ')}`);
@@ -1089,13 +1240,13 @@ export const createBookingFromCart = async (req, res) => {
               $near: {
                 $geometry: {
                   type: "Point",
-                  coordinates: [userLat, userLng], // Swapped
+                  coordinates: [userLat, userLng],
                 },
                 $maxDistance: 100000,
               },
             },
           }).limit(5);
-          
+
           console.log(`✅ Method 2 found: ${activePharmacies.length} pharmacies`);
         } catch (error) {
           console.log("❌ Method 2 geospatial query failed:", error.message);
@@ -1108,39 +1259,19 @@ export const createBookingFromCart = async (req, res) => {
     // METHOD 3: If still no pharmacies, get any active pharmacy
     if (!activePharmacies.length) {
       console.log("📋 Method 3: Getting any active pharmacy");
-      activePharmacies = await Pharmacy.find({ 
-        status: "Active" 
+      activePharmacies = await Pharmacy.find({
+        status: "Active"
       }).limit(5);
       console.log(`✅ Method 3 found: ${activePharmacies.length} active pharmacies`);
     }
 
-    // METHOD 4: If still no pharmacy, create a dummy one
+    // METHOD 4: If still no pharmacy found, return error
     if (!activePharmacies.length) {
-      console.log("⚡ Method 4: Creating system pharmacy");
-      
-      // Check if system pharmacy exists
-      let systemPharmacy = await Pharmacy.findOne({ name: "System Pharmacy" });
-      
-      if (!systemPharmacy) {
-        // Create a system pharmacy if none exists
-        systemPharmacy = new Pharmacy({
-          name: "System Pharmacy",
-          vendorName: "System",
-          vendorEmail: "system@pharmacy.com",
-          vendorPhone: "0000000000",
-          status: "Active",
-          address: "System Address",
-          location: {
-            type: "Point",
-            coordinates: [userLng || 77.1025, userLat || 28.7041] // Default to Delhi
-          }
-        });
-        await systemPharmacy.save();
-        console.log("✅ Created new system pharmacy");
-      }
-      
-      activePharmacies = [systemPharmacy];
-      console.log("✅ Using system pharmacy");
+      console.error("❌ No active pharmacies found in the system");
+      return res.status(500).json({
+        success: false,
+        message: "No active pharmacy available. Please try again later.",
+      });
     }
 
     // Select the first available pharmacy
@@ -1150,9 +1281,18 @@ export const createBookingFromCart = async (req, res) => {
     console.log(`📞 Pharmacy Contact: ${selectedPharmacy.vendorPhone || selectedPharmacy.phone}`);
 
     // ------------------------------------------------------------
-    // Create the order
+    // Create the order with netbanking handling
     // ------------------------------------------------------------
     console.log("\n📦 Creating order...");
+    
+    // Determine order status based on payment
+    let orderStatus = "Pending";
+    if (isNetbanking && paymentStatus === "Processing") {
+      orderStatus = "Payment Pending";
+    } else if (paymentStatus === "Captured" || paymentStatus === "Authorized") {
+      orderStatus = "Confirmed";
+    }
+
     const newOrder = new Order({
       userId,
       deliveryAddress,
@@ -1168,66 +1308,84 @@ export const createBookingFromCart = async (req, res) => {
       paymentMethod,
       transactionId: transactionId || null,
       paymentStatus,
-      status: "Pending",
+      status: orderStatus,
       statusTimeline: [
         {
-          status: "Pending",
-          message: "Order placed",
+          status: orderStatus,
+          message: `Order placed${isNetbanking ? ' (Netbanking payment processing)' : ''}`,
           timestamp: new Date(),
         },
       ],
       assignedPharmacy: selectedPharmacy._id,
       pharmacyResponse: "Pending",
       razorpayOrder: verifiedPaymentDetails || null,
+      isOnlinePayment: paymentMethod !== "Cash on Delivery",
+      paymentMethodType: isNetbanking ? "netbanking" : (paymentMethod.toLowerCase().includes('card') ? 'card' : 'other')
     });
 
     await newOrder.save();
     console.log(`✅ Order created successfully! Order ID: ${newOrder._id}`);
+    console.log(`📊 Order Status: ${orderStatus}, Payment Status: ${paymentStatus}`);
 
-    // Notify user
+    // Notify user with appropriate message
+    let userMessage = `Your order has been placed successfully. Order ID: ORD${newOrder._id.toString().slice(-6).toUpperCase()}`;
+    
+    if (isNetbanking && paymentStatus !== "Captured") {
+      userMessage += ` (Netbanking payment ${paymentStatus.toLowerCase()})`;
+    }
+
     user.notifications.push({
       orderId: newOrder._id,
-      status: "Pending",
-      message: `Your order has been placed successfully. Order ID: ORD${newOrder._id.toString().slice(-6).toUpperCase()}`,
+      status: orderStatus,
+      message: userMessage,
       timestamp: new Date(),
       read: false,
     });
     await user.save();
     console.log(`📨 Notification sent to user`);
 
-    // Notify selected pharmacy
-    if (selectedPharmacy.notifications) {
-      selectedPharmacy.notifications.push({
-        orderId: newOrder._id,
-        status: "Pending",
-        message: `New order placed by ${user.name}. Order ID: ORD${newOrder._id.toString().slice(-6).toUpperCase()}`,
-        timestamp: new Date(),
-        read: false,
-      });
-      await selectedPharmacy.save();
-      console.log(`📨 Notification sent to pharmacy`);
+    // Notify selected pharmacy (only if payment is successful or COD)
+    if (paymentStatus === "Captured" || paymentStatus === "Authorized" || paymentMethod === "Cash on Delivery") {
+      if (selectedPharmacy.notifications) {
+        selectedPharmacy.notifications.push({
+          orderId: newOrder._id,
+          status: orderStatus,
+          message: `New order placed by ${user.name}. Order ID: ORD${newOrder._id.toString().slice(-6).toUpperCase()}`,
+          timestamp: new Date(),
+          read: false,
+        });
+        await selectedPharmacy.save();
+        console.log(`📨 Notification sent to pharmacy`);
+      }
+    } else {
+      console.log(`⏳ Pharmacy notification delayed - waiting for payment confirmation`);
     }
 
-    // Clear cart
-    cart.items = [];
-    cart.subTotal = 0;
-    cart.platformFee = 0;
-    cart.deliveryCharge = 0;
-    cart.totalPayable = 0;
-    await cart.save();
-    console.log(`🛒 Cart cleared`);
+    // Clear cart only if payment is successful or COD
+    if (paymentStatus === "Captured" || paymentStatus === "Authorized" || paymentMethod === "Cash on Delivery" || paymentStatus === "Processing") {
+      cart.items = [];
+      cart.subTotal = 0;
+      cart.platformFee = 0;
+      cart.deliveryCharge = 0;
+      cart.totalPayable = 0;
+      await cart.save();
+      console.log(`🛒 Cart cleared`);
+    } else {
+      console.log(`⚠️ Cart not cleared - payment not confirmed`);
+    }
 
-    // Global notification for all
+    // Global notification
     await Notification.create({
       type: "Order",
       referenceId: newOrder._id,
-      message: `New order placed by ${user.name}, status: "Pending"`,
+      message: `New order placed by ${user.name}, status: "${orderStatus}"`,
     });
     console.log(`🔔 Global notification created`);
 
-    console.log("\n🎉 Order process completed successfully!");
-    
-    return res.status(201).json({
+    console.log("\n🎉 Order process completed!");
+
+    // Prepare response
+    const response = {
       success: true,
       message: "Order placed successfully",
       order: {
@@ -1255,19 +1413,31 @@ export const createBookingFromCart = async (req, res) => {
         discountAmount: discountAmount,
         totalPayable: totalPayable
       }
-    });
+    };
+
+    // Add payment note for netbanking
+    if (isNetbanking && paymentStatus !== "Captured") {
+      response.paymentNote = "Netbanking payment is being processed. Order will be confirmed once payment is successful.";
+      response.requiresPaymentConfirmation = true;
+    }
+
+    return res.status(201).json(response);
+
   } catch (error) {
     console.error("\n❌ Error in createBookingFromCart:", error);
-    
-    // More detailed error response
-    return res.status(500).json({ 
+
+    // Don't clear cart on error
+    console.log("⚠️ Cart preserved due to error");
+
+    return res.status(500).json({
       success: false,
-      message: "Server Error", 
+      message: "Server Error",
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
+
 export const getMyBookings = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -2251,17 +2421,17 @@ export const getUserPeriodicOrders = async (req, res) => {
           status: order.status,
           pharmacy: order.assignedPharmacy
             ? {
-                _id: order.assignedPharmacy._id,
-                name: order.assignedPharmacy.name,
-                phone: order.assignedPharmacy.phone,
-              }
+              _id: order.assignedPharmacy._id,
+              name: order.assignedPharmacy.name,
+              phone: order.assignedPharmacy.phone,
+            }
             : null,
           rider: order.assignedRider
             ? {
-                _id: order.assignedRider._id,
-                name: order.assignedRider.name,
-                phone: order.assignedRider.phone,
-              }
+              _id: order.assignedRider._id,
+              name: order.assignedRider.name,
+              phone: order.assignedRider.phone,
+            }
             : null,
           notes: order.notes,
           voiceNoteUrl: order.voiceNoteUrl,

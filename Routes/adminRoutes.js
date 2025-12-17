@@ -60,7 +60,7 @@ router.get('/vendorqueries', getAllVendorQueries);
 router.put('/updatequeries/:queryId', updateRiderQuery); // :queryId in URL params
 router.delete('/deletequeries/:queryId', deleteRiderQuery); // :queryId in URL params
 router.get('/allpreodicorders', getAllPreodicOrders);
-router.put('/updatepreodicorders/:orderId', updatePeriodicOrder);
+router.put('/updatepreodicorders/:userId/:orderId', updatePeriodicOrder);
 router.delete('/deletepreodicorders/:orderId', deletePeriodicOrder);
 router.post("/createfaq", createFaq);
 router.get("/allfaq", getAllFaqs);

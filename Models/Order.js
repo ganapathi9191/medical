@@ -19,6 +19,7 @@ const orderSchema = new mongoose.Schema(
           type: mongoose.Schema.Types.ObjectId,
           ref: 'Medicine',
         },
+        
         name: { type: String },
         quantity: { type: Number, min: 1 }
       }
@@ -61,7 +62,7 @@ const orderSchema = new mongoose.Schema(
     assignedRiderStatus: {
       type: String,
       enum: ['Assigned', 'Accepted', 'Pending', 'Rejected', 'In Progress', 'Completed', 'PickedUp', 'Failed'],
-      default: 'Pending'
+      default: 'Assigned'
     },
     transactionId: {
       type: String,
@@ -74,7 +75,7 @@ const orderSchema = new mongoose.Schema(
       default: "Pending",
     },
 
-     orderByVendor: { type: mongoose.Schema.Types.ObjectId, ref: 'Pharmacy' }, // Vendor's reference
+    orderByVendor: { type: mongoose.Schema.Types.ObjectId, ref: 'Pharmacy' }, // Vendor's reference
 
     razorpayOrder: {
       type: mongoose.Schema.Types.Mixed, // Store full Razorpay order/payment response
@@ -111,49 +112,49 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
     collectedAmount: Number,
-codPaymentMode: String, // e.g., 'cash' or 'online'
+    codPaymentMode: String, // e.g., 'cash' or 'online'
 
- // Medicine proof before pickup (NEW FIELD)
-  beforePickupProof: [{
-    riderId: {
+    // Medicine proof before pickup (NEW FIELD)
+    beforePickupProof: [{
+      riderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Rider'
+      },
+      imageUrl: String,
+      uploadedAt: {
+        type: Date,
+        default: Date.now
+      },
+      medicineId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Medicine'
+      },
+      pharmacyId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Pharmacy'
+      }
+    }],
+
+
+    couponCode: { type: String, default: null },   // Store the applied coupon code
+    discountAmount: { type: Number, default: 0 },   // Store the discount applied
+    isPrescriptionOrder: { type: Boolean, default: false },  // New field added to track prescription order
+    assignedPharmacy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Rider'
+      ref: 'Pharmacy',
     },
-    imageUrl: String,
-    uploadedAt: {
-      type: Date,
-      default: Date.now
+
+    pharmacyResponse: {
+      type: String,
+      enum: ["Pending", "Accepted", "Rejected"],
+      default: "Pending"
     },
-    medicineId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Medicine'
+
+    rejectedPharmacies: {
+      type: [mongoose.Schema.Types.ObjectId],
+      ref: 'Pharmacy',
+      default: [],
     },
-    pharmacyId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Pharmacy'
-    }
-  }],
-
-
-   couponCode: { type: String, default: null },   // Store the applied coupon code
-  discountAmount: { type: Number, default: 0 },   // Store the discount applied
-  isPrescriptionOrder: { type: Boolean, default: false },  // New field added to track prescription order
-  assignedPharmacy: {
-  type: mongoose.Schema.Types.ObjectId,
-  ref: 'Pharmacy',
-},
-
-pharmacyResponse: {
-  type: String,
-  enum: ["Pending", "Accepted", "Rejected"],
-  default: "Pending"
-},
-
-rejectedPharmacies: {
-  type: [mongoose.Schema.Types.ObjectId],
-  ref: 'Pharmacy',
-  default: [],
-},
 
 
 

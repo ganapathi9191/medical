@@ -30,7 +30,7 @@ categories: [
   vendorName: { type: String, },
   vendorEmail: { type: String,  },
   vendorPhone: { type: String, },
-  status: { type: String, enum: ["Pending", "Active", "Suspended", "Inactive"], default: "Pending" },
+  status: { type: String, enum: ["Pending", "Active", "Inactive","Suspended","Rejected"], default: "Pending" },
    vendorId: { type: String, unique: true }, // auto-generated vendor ID
   password: { type: String }, // 4-digit password (can be hashed if needed)
   address: {
