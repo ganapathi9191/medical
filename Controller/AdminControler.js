@@ -914,7 +914,7 @@ export const updateRider = async (req, res) => {
 
     // Save updated rider
     await rider.save();
-
+ 
     return res.status(200).json({
       message: "Rider updated successfully",
       rider,

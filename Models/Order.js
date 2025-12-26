@@ -19,7 +19,7 @@ const orderSchema = new mongoose.Schema(
           type: mongoose.Schema.Types.ObjectId,
           ref: 'Medicine',
         },
-        
+
         name: { type: String },
         quantity: { type: Number, min: 1 }
       }
@@ -51,9 +51,14 @@ const orderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled', 'Refunded', 'Assigned', 'Accepted', 'Rejected', 'In Progress', 'Completed', 'PickedUp', 'Failed'],
-      default: 'Pending'
+      enum: [
+        'Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled',
+        'Refunded', 'Assigned', 'Accepted', 'Rejected',
+        'In Progress', 'Completed', 'PickedUp', 'Failed'
+      ],
+      default: 'Assigned' // ✅ IMPORTANT FIX
     },
+
     assignedRider: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Rider",

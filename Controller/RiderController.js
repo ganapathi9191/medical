@@ -389,7 +389,6 @@ export const getNewOrdersForRiderController = async (req, res) => {
 
     const riderLat = parseFloat(rider.latitude);
     const riderLon = parseFloat(rider.longitude);
-    const deliveryCharge = parseFloat(rider.deliveryCharge) || 0;
 
     // Fetch new orders
     const newOrders = await Order.find({
@@ -445,16 +444,21 @@ export const getNewOrdersForRiderController = async (req, res) => {
           [userLocation[0], userLocation[1]]
         );
 
-        // Time estimation from CURRENT TIME
-        const now = new Date();
+        // ✅ FIX 1: Get delivery charge from ORDER, not rider
+        const deliveryCharge = parseFloat(order.deliveryCharge) || 0;
+
+        // ✅ FIX: Use current time instead of order.createdAt
+        const orderCreationTime = new Date();
+
         const pickupMinutes = calculateTime(pickupDistance);
         const dropMinutes = calculateTime(dropDistance);
 
-        const pickupEstimate = addMinutesToTime(now, pickupMinutes);
-        const dropEstimate = addMinutesToTime(now, pickupMinutes + dropMinutes);
+        const pickupEstimate = addMinutesToTime(orderCreationTime, pickupMinutes);
+        const dropEstimate = addMinutesToTime(orderCreationTime, pickupMinutes + dropMinutes);
 
         const formattedPickup = formatTimeTo12Hour(pickupEstimate);
         const formattedDrop = formatTimeTo12Hour(dropEstimate);
+
 
         // Billing calculation
         let subTotal = 0;
@@ -652,7 +656,7 @@ export const getPickedUpOrdersForRiderController = async (req, res) => {
       });
 
       const platformFee = 10;
-      const deliveryCharge = parseFloat(rider.deliveryCharge) || 0;
+      const deliveryCharge = parseFloat(order.deliveryCharge) || 0;
       const totalPaid = subTotal + platformFee + deliveryCharge;
 
       return {
@@ -760,7 +764,7 @@ export const updateRiderStatusController = async (req, res) => {
           if (nearestRider) {
             // ✅ Reassign to new rider
             freshOrder.assignedRider = nearestRider._id;
-            freshOrder.assignedRiderStatus = 'Pending';
+            freshOrder.assignedRiderStatus = 'Assigned';
             freshOrder.status = 'Assigned';
 
             freshOrder.statusTimeline.push({
@@ -887,7 +891,7 @@ export const getSingleOrderForRiderController = async (req, res) => {
 
     const riderLat = parseFloat(rider.latitude);
     const riderLon = parseFloat(rider.longitude);
-    const deliveryCharge = parseFloat(rider.deliveryCharge) || 0;
+    const deliveryCharge = parseFloat(order.deliveryCharge) || 0;
 
     const pharmacy = order.orderItems[0]?.medicineId?.pharmacyId;
     const userLocation = order.userId?.location?.coordinates;
@@ -1016,7 +1020,7 @@ export const getAllActiveOrdersForRiderController = async (req, res) => {
       });
 
       const platformFee = 10; // Static platform fee
-      const deliveryCharge = parseFloat(rider.deliveryCharge) || 0; // Rider's delivery charge
+      const deliveryCharge = parseFloat(order.deliveryCharge) || 0;
       const totalPaid = subTotal + platformFee + deliveryCharge;
 
       return {
@@ -1117,7 +1121,7 @@ export const getAllCompletedOrdersForRiderController = async (req, res) => {
       });
 
       const platformFee = 10; // Static platform fee
-      const deliveryCharge = parseFloat(rider.deliveryCharge) || 0; // Rider's delivery charge
+      const deliveryCharge = parseFloat(order.deliveryCharge) || 0;
       const totalPaid = subTotal + platformFee + deliveryCharge;
 
       return {
@@ -1462,56 +1466,59 @@ export const getUpiInfo = async (req, res) => {
 };
 
 
+
 export const getRiderWalletController = async (req, res) => {
   try {
     const { riderId } = req.params;
 
-    // Validate Rider ID
+    // ✅ Validate Rider ID
     if (!mongoose.Types.ObjectId.isValid(riderId)) {
       return res.status(400).json({ message: "Invalid rider ID" });
     }
 
-    // Fetch Rider
-    const rider = await Rider.findById(riderId).select(
-      "name wallet deliveryCharge createdAt"
-    );
+    // ✅ Fetch Rider
+    const rider = await Rider.findById(riderId).select("name wallet createdAt");
 
     if (!rider) {
       return res.status(404).json({ message: "Rider not found" });
     }
 
-    const deliveryCharge = parseFloat(rider.deliveryCharge || 0);
-
-    // Use rider's createdAt as start date and now as end date
-    const startDate = new Date(rider.createdAt);
+    // ✅ Date range
+    const startDate = rider.createdAt;
     const endDate = new Date();
 
-    // Fetch all completed orders in date range
+    // ✅ Fetch completed orders
     const completedOrders = await Order.find({
       assignedRider: riderId,
       assignedRiderStatus: "Completed",
-      createdAt: { $gte: startDate, $lte: endDate },
-    });
+    }).select("deliveryCharge");
 
-    const totalEarnings = completedOrders.length * deliveryCharge;
-
-    // Format date range
-    const formattedStart = moment(startDate).format("DD MMM YYYY");
-    const formattedEnd = moment(endDate).format("DD MMM YYYY");
+    // ✅ Calculate earnings safely
+    const totalEarnings = completedOrders.reduce(
+      (sum, order) => sum + Number(order.deliveryCharge || 0),
+      0
+    );
 
     return res.status(200).json({
-      wallet: `₹${(rider.wallet || 0).toFixed(2)}`,
-      totalEarningsMessage: `Total Earnings from ${formattedStart} to ${formattedEnd}: ₹${totalEarnings.toFixed(
-        2
-      )}`,
+      success: true,
+      riderName: rider.name,
+      walletBalance: Number(rider.wallet || 0),
+      totalEarnings,
+      earningsPeriod: {
+        from: moment(startDate).format("DD MMM YYYY"),
+        to: moment(endDate).format("DD MMM YYYY"),
+      },
     });
+
   } catch (error) {
     console.error("Error fetching rider wallet:", error);
-    return res
-      .status(500)
-      .json({ message: "Server error while fetching wallet" });
+    return res.status(500).json({
+      success: false,
+      message: "Server error while fetching wallet",
+    });
   }
 };
+
 
 
 export const withdrawAmountFromWalletController = async (req, res) => {
@@ -1530,20 +1537,24 @@ export const withdrawAmountFromWalletController = async (req, res) => {
     const rider = await Rider.findById(riderId);
     if (!rider) return res.status(404).json({ message: "Rider not found" });
 
-    const walletBalance = parseFloat(rider.wallet || 0);
-    if (amount > walletBalance) {
+    const walletBalance = Number(rider.wallet || 0);
+    const withdrawAmount = Number(amount);
+
+    if (withdrawAmount > walletBalance) {
       return res.status(400).json({ message: "Insufficient wallet balance" });
     }
 
-    const bankDetail = rider.accountDetails.find(b => b._id.toString() === bankId);
+    const bankDetail = rider.accountDetails.find(
+      b => b._id.toString() === bankId
+    );
     if (!bankDetail) {
       return res.status(404).json({ message: "Bank account not found" });
     }
 
-    // Create a new withdrawal request (but don't deduct now)
+    // ✅ CREATE WITHDRAW REQUEST
     const request = new withdrawalRequestModel({
       riderId,
-      amount,
+      amount: withdrawAmount,
       bankDetail: {
         accountHolderName: bankDetail.accountHolderName,
         accountNumber: bankDetail.accountNumber,
@@ -1551,22 +1562,38 @@ export const withdrawAmountFromWalletController = async (req, res) => {
         bankName: bankDetail.bankName,
         upiId: bankDetail.upiId || null
       },
-      status: 'Requested'
+      status: "Requested"
     });
 
-    await request.save();
+    // ✅ DEDUCT WALLET (FIX)
+    rider.wallet = walletBalance - withdrawAmount;
+
+    // ✅ ADD WALLET TRANSACTION (FIX)
+    rider.walletTransactions.push({
+      amount: withdrawAmount,
+      type: "debit",
+      createdAt: new Date()
+    });
+
+    // ✅ SAVE BOTH
+    await Promise.all([request.save(), rider.save()]);
 
     return res.status(200).json({
       message: "Withdrawal request submitted successfully. Awaiting approval.",
       requestId: request._id,
-      status: request.status
+      status: request.status,
+      remainingWalletBalance: `₹${rider.wallet.toFixed(2)}`
     });
 
   } catch (error) {
     console.error("Error submitting withdrawal request:", error);
-    return res.status(500).json({ message: "Server error during withdrawal request" });
+    return res.status(500).json({
+      message: "Server error during withdrawal request",
+      error: error.message
+    });
   }
 };
+
 
 
 
@@ -1942,7 +1969,7 @@ export const uploadMedicineProof = async (req, res) => {
     }
 
     const firstMedicineId = order.orderItems[0].medicineId;
-    
+
     // Find medicine details
     const medicine = await Medicine.findById(firstMedicineId);
     if (!medicine) {
@@ -1963,8 +1990,8 @@ export const uploadMedicineProof = async (req, res) => {
 
     // Check if rider has latitude and longitude
     if (!rider.latitude || !rider.longitude) {
-      return res.status(400).json({ 
-        message: "Rider location not available. Please enable location services." 
+      return res.status(400).json({
+        message: "Rider location not available. Please enable location services."
       });
     }
 
@@ -1984,11 +2011,12 @@ export const uploadMedicineProof = async (req, res) => {
     const distanceInMeters = distanceInKm * 1000;
 
     // Set proximity threshold (e.g., 100 meters)
-    const PROXIMITY_THRESHOLD = 100;
+    const PROXIMITY_THRESHOLD = 400;
 
+    // Distance check
     if (distanceInMeters > PROXIMITY_THRESHOLD) {
-      return res.status(403).json({ 
-        message: "You are not at the vendor's location. Please go to the vendor's location first.",
+      return res.status(403).json({
+        message: "You are not at the vendor's location. Please move closer.",
         distance: Math.round(distanceInMeters),
         threshold: PROXIMITY_THRESHOLD
       });
